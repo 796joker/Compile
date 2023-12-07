@@ -27,6 +27,8 @@ public class Generator {
     private static final String I8POINT = "i8*";
     private static final String I1POINT = "i1*";
 
+    private static final String ZEROINITIALIZER = "zeroinitializer";
+
     private static final String LBRACE = "{";
     private static final String RBRACE = "}";
     private static final String BR = "br";
@@ -123,14 +125,15 @@ public class Generator {
     }
 
     public Symbol findSymbol(String name) {
-        // 如果当前要查找的变量名是正在定义的变量名,则跳出当前符号表查找
-        // 因为如果没有错误,同一层符号表是不会有重复定义的
         // 正在定义或尚未定义的变量的llvmName是null
+        // 已经定义好的变量的llvmName不为null
         SymbolTable tmp = curSymbolTable;
         Symbol ret = null;
         while (tmp != null) {
             if ((ret = tmp.getSymbol(name)) != null) {
-                // 如果是已经定义好的变量名或正要命名的定义变量,则找到
+                // 满足以下条件之一,此符号有效可返回:
+                // 1.llvmName不为null,说明已经定义完成
+                // 2.llvmName为null,但是现在正将要写入llvmName的定义变量
                 if (ret.getLlvmName() != null || Objects.equals(defName, name)) {
                     break;
                 }
@@ -430,6 +433,53 @@ public class Generator {
         ret.add("declare void @putch(i32)");
     }
 
+    /**
+     * 添加数组初始化值
+     * @param stringJoiner 指令拼装者
+     */
+    public boolean initArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, int size, boolean isConst, String innerDim) {
+        boolean allZeroFlag = true;
+        ArrayList<Integer> initValList = new ArrayList<>();
+        int initVal;
+        if (isConst) {
+            for (ConstInitValNode ele : constInitValNode.getConstInitValNodes()) {
+                initVal = constAddExpHandler(ele.getConstExpNode().getAddExpNode());
+                if (initVal != 0) {
+                    allZeroFlag = false;
+                }
+                initValList.add(initVal);
+            }
+        }
+        else {
+            for (InitValNode ele : initValNode.getInitValNodes()) {
+                initVal = constAddExpHandler(ele.getExpNode().getAddExpNode());
+                if (initVal != 0) {
+                    allZeroFlag = false;
+                }
+                initValList.add(initVal);
+            }
+        }
+        // 如果全零,则用zeroinitializer
+        if (allZeroFlag) {
+            stringJoiner.add(ZEROINITIALIZER);
+        }
+        // 不是则一个个放入
+        // @a = dso_local global [10 x i32] [i32 1, i32 2, i32 3, i32 0, i32 0, i32 0, i32 0, i32 0, i32 0, i32 0]
+        else {
+            StringJoiner initValSj = new StringJoiner(", ", "[", "]");
+            for (int i=0; i<size; i++) {
+                initValSj.add(I32 + " " + initValList.get(i).toString());
+            }
+            // 是二维的,要加上二维类型
+            if (innerDim != null) {
+                stringJoiner.add(innerDim + " " + initValSj);
+            }
+            else {
+                stringJoiner.add(initValSj.toString());
+            }
+        }
+        return allZeroFlag;
+    }
 
 
     // 获取语法分析时生成的AST,遍历各个成分进行分析
@@ -451,43 +501,128 @@ public class Generator {
     }
 
     /**
+     * 数组处理函数
+     */
+    public String arrHandler(StringJoiner stringJoiner, List<ConstExpNode> constExpNodes, int size, InitValNode initValNode, ConstInitValNode constInitValNode, boolean isConst) {
+        // VarDef → Ident { '[' ConstExp ']' } | Ident { '[' ConstExp ']' } '=' InitVal
+        // 计算各个维度维数
+
+        int[] dim = {0, 0};
+        String llvmType;
+        for (int i=0; i<size; i++) {
+            ConstExpNode constExpNode = constExpNodes.get(i);
+            dim[i] = constAddExpHandler(constExpNode.getAddExpNode());
+        }
+        // 记录维度
+        // 内层维度,一维即本身,二维是第二维的维度
+        String innerDim = null;
+        if (size == 1) {
+            llvmType = "[" + dim[0] + " x " + I32 + "]";
+        }
+        else {
+            innerDim = "[" + dim[1] + " x " + I32 + "]";
+            llvmType = "[" + dim[0] + " x " + innerDim + "]";
+        }
+        // 指令拼接类型
+        stringJoiner.add(llvmType);
+        // 非全局常量,且无初值,默认全零
+        if (!isConst && initValNode == null) {
+            stringJoiner.add(ZEROINITIALIZER);
+        }
+        // 有初值
+        else {
+            // 一维
+            if (size == 1) {
+                initArr(constInitValNode, initValNode, stringJoiner, size, isConst, null);
+            }
+            // 二维
+            else {
+                boolean allZeroFlag = true;
+                StringJoiner initValSj = new StringJoiner(", ", "[", "]");
+                // 常量的初值表达式
+                if (isConst) {
+                    for (ConstInitValNode ele : constInitValNode.getConstInitValNodes()) {
+                        boolean innerFlag = initArr(ele, null, initValSj, dim[1], true, innerDim);
+                        if (!innerFlag) {
+                            allZeroFlag = false;
+                        }
+                    }
+                }
+                // 变量的初值表达式
+                else {
+                    for (InitValNode ele : initValNode.getInitValNodes()) {
+                        boolean innerFlag = initArr(null, ele, initValSj, dim[1], false, innerDim);
+                        if (!innerFlag) {
+                            allZeroFlag = false;
+                        }
+                    }
+                }
+                // 二维都全零
+                // @b = dso_local global [10 x [20 x i32]] zeroinitializer
+                if (allZeroFlag) {
+                    stringJoiner.add(ZEROINITIALIZER);
+                }
+                // 非全零
+                else {
+                    stringJoiner.add(initValSj.toString());
+                }
+            }
+        }
+        // TODO 优化设置每一维的维度
+        return llvmType;
+    }
+
+
+
+    /**
      * 处理全局变量的定义
      */
     public Instruction globalDeclHandler(DeclNode declNode) {
         VarDeclNode varDeclNode = declNode.getVarDeclNode();
         ConstDeclNode constDeclNode = declNode.getConstDeclNode();
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
+        int constValue = 0;
+        String llvmType;
+        String name;
+        int size;
         // 全局变量
         if (varDeclNode != null) {
             // @b = dso_local global i32 5
             List<VarDefNode> varDefNodes = varDeclNode.getVarDefNodes();
             for (VarDefNode varDefNode : varDefNodes) {
                 // 遍历变量定义
+                name = varDefNode.getIdentToken().getValue();
+                size = varDefNode.getConstExpNodes().size();
+                InitValNode initValNode = varDefNode.getInitValNode();
+                // 用于拼接指令
+                StringJoiner stringJoiner = new StringJoiner(" ", "", "");
+                stringJoiner.add("@" + name).add("=").add("dso_local").add("global");
                 // 非数组
-                if (varDefNode.getConstExpNodes().size() == 0) {
-                    String name = varDefNode.getIdentToken().getValue();
+                if (size == 0) {
                     // 查看是否有初值, 没有初始值的默认为0
-                    int constValue = 0;
-                    if (varDefNode.getInitValNode() != null) {
+                    constValue = 0;
+                    llvmType = I32;
+                    if (initValNode != null) {
                         AddExpNode addExpNode = varDefNode.getInitValNode().getExpNode().getAddExpNode();
                         constValue = constAddExpHandler(addExpNode);
                     }
-                    // 记录指令
-                    StringJoiner stringJoiner = new StringJoiner(" ", "", "");
-                    stringJoiner.add("@" + name).add("=").add("dso_local").add("global").add(I32).add(String.valueOf(constValue));
-                    instruction.addInstruction(stringJoiner.toString());
-                    // 定义完毕,设置定义变量llvmName
-                    defName = name;
-                    // 此时才记录进符号表
-                    Symbol symbol = findSymbol(name);
-                    defName = null;
-                    symbol.setLlvmName("@" + name);
-                    symbol.setLlvmType(I32);
-                    symbolIntegerHashMap.put(symbol, constValue);
+                    // 记录初值
+                    stringJoiner.add(I32).add(String.valueOf(constValue));
                 }
                 // 数组
                 else {
+                    llvmType = arrHandler(stringJoiner, varDefNode.getConstExpNodes(), size, initValNode, null, false);
                 }
+                // 定义完毕,设置定义变量llvmName
+                defName = name;
+                // 此时才记录进符号表
+                Symbol symbol = findSymbol(name);
+                defName = null;
+                symbol.setLlvmName("@" + name);
+                symbol.setLlvmType(llvmType);
+                symbolIntegerHashMap.put(symbol, constValue);
+                // 记录指令
+                instruction.addInstruction(stringJoiner.toString());
             }
         }
         // 全局常量, 一定有初值
@@ -496,30 +631,41 @@ public class Generator {
             // // @a = dso_local constant i32 5
             for (ConstDefNode constDefNode : constDeclNode.getConstDefNodes()) {
                 // 遍历常量定义
+                name = constDefNode.getIdentToken().getValue();
+                size = constDefNode.getConstExpNodes().size();
+                ConstInitValNode constInitValNode = constDefNode.getConstInitValNode();
+                // 用于拼接指令
+                StringJoiner stringJoiner = new StringJoiner(" ", "", "");
+                stringJoiner.add("@" + name).add("=").add("dso_local").add("constant");
                 // 非数组
-                if (constDefNode.getConstExpNodes().size() == 0) {
-                    String name = constDefNode.getIdentToken().getValue();
-                    int constValue = constAddExpHandler(constDefNode.getConstInitValNode().getConstExpNode().getAddExpNode());
-                    // 记录指令
-                    StringJoiner stringJoiner = new StringJoiner(" ", "", "");
-                    stringJoiner.add("@" + name).add("=").add("dso_local").add("constant").add(I32).add(String.valueOf(constValue));
-                    instruction.addInstruction(stringJoiner.toString());
-                    // 定义完毕,设置定义变量llvmName
-                    defName = name;
-                    Symbol symbol = findSymbol(name);
-                    defName = null;
-                    symbol.setLlvmName("@" + name);
-                    symbol.setLlvmType(I32);
-                    symbolIntegerHashMap.put(symbol, constValue);
+                if (size == 0) {
+                    constValue = constAddExpHandler(constInitValNode.getConstExpNode().getAddExpNode());
+                    llvmType = I32;
+                    // 记录初值
+                    stringJoiner.add(I32).add(String.valueOf(constValue));
                 }
                 // 数组
                 else {
+                    llvmType = arrHandler(stringJoiner, constDefNode.getConstExpNodes(), size, null, constInitValNode, true);
                 }
+                // 定义完毕,设置定义变量llvmName
+                defName = name;
+                // 此时才记录进符号表
+                Symbol symbol = findSymbol(name);
+                defName = null;
+                symbol.setLlvmName("@" + name);
+                symbol.setLlvmType(llvmType);
+                symbolIntegerHashMap.put(symbol, constValue);
+                // 记录指令
+                instruction.addInstruction(stringJoiner.toString());
             }
         }
         return instruction;
     }
 
+    /**
+     * 返回计算得到的常量数值
+     */
     public int constAddExpHandler(AddExpNode addExpNode) {
         // AddExp → MulExp | AddExp ('+' | '−') MulExp
         int val1 = 0;
