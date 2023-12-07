@@ -3,8 +3,8 @@ package llvm;
 import java.util.Objects;
 
 public class AllocElement {
-    String llvmName;
-    String instruction;
+    private final String llvmName;
+    private final String instruction;
 
     public AllocElement(String llvmName, String instruction) {
         this.llvmName = llvmName;
