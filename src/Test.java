@@ -1,11 +1,17 @@
+import java.io.*;
 import java.util.StringJoiner;
 
 public class Test {
     public static void main(String[] args) {
-        StringJoiner sj1 = new StringJoiner("\n");
-        sj1.add("1").add("2");
-        StringJoiner sj2 = new StringJoiner("\n");
-        sj2.add(sj1.toString());
-        System.out.println(sj2.toString());
+        int num = 2;
+        try(BufferedReader bf = new BufferedReader(new FileReader("A/testfile" + num + ".txt"));
+            BufferedWriter bw = new BufferedWriter(new FileWriter("testfile.txt"))) {
+            String line;
+            while ((line = bf.readLine()) != null) {
+                bw.write(line + "\n");
+            }
+        }catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 }

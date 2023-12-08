@@ -17,7 +17,7 @@ import java.util.StringJoiner;
 
 public class Analyzer {
     private static final String OUTPUT_FILE_PATH = "output.txt";
-    private static final String INPUT_FILE_PATH = "testfile.txt";
+    private static final String INPUT_FILE_PATH = "A/testfile2.txt";
     private static final String ERROR_FILE_PATH = "error.txt";
     private static final String LLVM_FILE_PATH = "llvm_ir.txt";
     public static void lexerAnalyze(boolean needShowInfo) {
@@ -75,15 +75,9 @@ public class Analyzer {
         symbolTableBuilder.init();
         symbolTableBuilder.buildSymbolTable();
         List<DefError> errorList = ErrorHandler.getErrorHandler().getErrorList();
-        List<SymbolTable> symbolTables = symbolTableBuilder.getSymbolTables();
         if (needShowInfo) {
             // 行数从小到大
-            errorList.sort(new Comparator<DefError>() {
-                @Override
-                public int compare(DefError o1, DefError o2) {
-                    return o1.getLineNum() - o2.getLineNum();
-                }
-            });
+            errorList.sort(Comparator.comparingInt(DefError::getLineNum));
            try (BufferedWriter bw = new BufferedWriter(new FileWriter(ERROR_FILE_PATH))) {
                for (DefError defError : errorList) {
                    bw.write(defError.toString());

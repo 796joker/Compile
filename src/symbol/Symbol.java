@@ -7,6 +7,7 @@ public class Symbol {
 
     private String llvmName = null;
     private String llvmType = null;
+    private int dimension = -1;
     public void setLlvmType(String llvmType) {
         this.llvmType = llvmType;
     }
@@ -17,6 +18,10 @@ public class Symbol {
 
     public String getLlvmName() {
         return llvmName;
+    }
+
+    public int getDimension() {
+        return dimension;
     }
 
     public String getLlvmType() {
