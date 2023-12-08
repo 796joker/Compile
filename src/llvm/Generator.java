@@ -1098,6 +1098,30 @@ public class Generator {
         return instruction;
     }
 
+    /**
+     * 数组LVal赋值处理
+     */
+    public void arrLValHandler(int dimension, LValNode lValNode, ValSymbol valSymbol, String sName, Instruction instruction) {
+        // LVal → Ident {'[' Exp ']'}
+        String[] dim = {null, null};
+        Instruction addExpInstruction;
+        for (int i=0; i<dimension; i++) {
+            ExpNode expNode = lValNode.getExpNodes().get(i);
+            addExpInstruction = addExpHandler(expNode.getAddExpNode(), true);
+            instruction.addInstruction(addExpInstruction.toString());
+            dim[i] = addExpInstruction.getLlvmName();
+        }
+        // 取出数组元素
+        Instruction elementPtr = getElementPtr(valSymbol.getLlvmType(), valSymbol.getLlvmName(), dim[0], dim[1]);
+        instruction.addInstruction(elementPtr.toString());
+        String dName = elementPtr.getLlvmName();
+        // 存入值
+        String store = store(I32, sName, I32POINT, dName);
+        instruction.addInstruction(store);
+        instruction.setLlvmName(dName);
+    }
+
+
     public Instruction stmtHandler(StmtNode stmtNode, boolean ifFlag, boolean elseFlag, boolean forFlag) {
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
         Instruction addExpInstruction;
@@ -1155,22 +1179,7 @@ public class Generator {
                 }
                 // 数组
                 else {
-                    // LVal → Ident {'[' Exp ']'}
-                    String[] dim = {null, null};
-                    for (int i=0; i<dimension; i++) {
-                        ExpNode expNode = lValNode.getExpNodes().get(i);
-                        addExpInstruction = addExpHandler(expNode.getAddExpNode(), true);
-                        instruction.addInstruction(addExpInstruction.toString());
-                        dim[i] = addExpInstruction.getLlvmName();
-                    }
-                    // 取出数组元素
-                    Instruction elementPtr = getElementPtr(valSymbol.getLlvmType(), llvmName, dim[0], dim[1]);
-                    instruction.addInstruction(elementPtr.toString());
-                    String dName = elementPtr.getLlvmName();
-                    // 存入值
-                    String store = store(I32, sName, I32POINT, dName);
-                    instruction.addInstruction(store);
-                    instruction.setLlvmName(dName);
+                    arrLValHandler(dimension, lValNode, valSymbol, sName, instruction);
                 }
                 break;
             case PRINT:
@@ -1545,7 +1554,8 @@ public class Generator {
                 // 记录函数调用指令
                 instruction.addInstruction(allocElement.getInstruction());
                 // 通过标识符名称找到其在中间代码中的名称(全局变量为@*,局部变量为%*)
-                name = stmtNode.getlValNode().getIdentToken().getValue();
+                lValNode = stmtNode.getlValNode();
+                name = lValNode.getIdentToken().getValue();
                 valSymbol = (ValSymbol) findSymbol(name);
                 String dName = valSymbol.getLlvmName();
                 dimension = valSymbol.getDimension();
@@ -1554,8 +1564,9 @@ public class Generator {
                     // 记录store指令
                     instruction.addInstruction(store(I32, rVal, I32POINT, dName));
                 }
-                // TODO 数组
+                // 数组
                 else {
+                    arrLValHandler(dimension, lValNode, valSymbol, rVal, instruction);
                 }
                 break;
             case RETURN:
@@ -1590,7 +1601,8 @@ public class Generator {
         instruction.addInstruction(addExpInstruction.toString());
 
         // LVal类型
-        String name = forStmtOne.getlValNode().getIdentToken().getValue();
+        LValNode lValNode = forStmtOne.getlValNode();
+        String name = lValNode.getIdentToken().getValue();
         ValSymbol valSymbol = (ValSymbol) findSymbol(name);
         int dimension = valSymbol.getDimension();
         // 非数组
@@ -1600,7 +1612,7 @@ public class Generator {
         }
         // 数组
         else {
-            // 取出具体元素再赋值
+            arrLValHandler(dimension, lValNode, valSymbol, rVal, instruction);
         }
         return instruction;
     }
