@@ -5,7 +5,7 @@ import java.util.StringJoiner;
 /**
  * @author AS
  */
-public class GlobalVal extends User{
+public class GlobalVal {
     private String name;
     /**
      * 如果是变量,那么可以没有值

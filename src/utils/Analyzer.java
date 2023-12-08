@@ -17,7 +17,7 @@ import java.util.StringJoiner;
 
 public class Analyzer {
     private static final String OUTPUT_FILE_PATH = "output.txt";
-    private static final String INPUT_FILE_PATH = "A/testfile2.txt";
+    private static final String INPUT_FILE_PATH = "testfile.txt";
     private static final String ERROR_FILE_PATH = "error.txt";
     private static final String LLVM_FILE_PATH = "llvm_ir.txt";
     public static void lexerAnalyze(boolean needShowInfo) {

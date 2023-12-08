@@ -392,6 +392,7 @@ public class Generator {
                 instruction.add(tmp).add("=").add("call").add(I32).add(funcSymbol.getLlvmName() + argsJoiner);
             }
             case VOID -> instruction.add("call").add("void").add(funcSymbol.getLlvmName() + argsJoiner);
+            default -> System.out.println("unexpected func returnType");
         }
         return new AllocElement(tmp, instruction.toString());
     }
@@ -431,11 +432,11 @@ public class Generator {
     }
 
     /**
-     * 添加数组初始化值
+     * 初始化全局数组
      * @param size 初始值数量,即此维度的长度
      * @param stringJoiner 指令拼装者
      */
-    public boolean initArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, int size, boolean isConst, String innerDim) {
+    public boolean initGlobalArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, int size, boolean isConst, String innerDim) {
         boolean allZeroFlag = true;
         ArrayList<Integer> initValList = new ArrayList<>();
         int initVal;
@@ -529,18 +530,38 @@ public class Generator {
 
     /**
      * 获取数组元素
+     * @param arrInfo 封装了数组信息的对象
+     * @param dim 要取的维度的值
      */
-    public Instruction getElementPtr(String arrType, String arrName, String dimOne, String dimTwo, int dimension) {
+    public Instruction getElementPtr(ArrInfo arrInfo, String[] dim) {
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
-        // %3 = getelementptr [5 x [7 x i32]], [5 x [7 x i32]]* @a, i32 0, i32 3, i32 4
-        String tmp = alloc(arrType).getLlvmName();
+        String[] arrSymbolInfo = arrInfo.getArrSymbolInfo();
+        int[] dimensionInfo = arrInfo.getDimensionInfo();
+        String innerDim = arrSymbolInfo[0], arrType = arrSymbolInfo[1], arrName = arrSymbolInfo[2];
+        int dimension = dimensionInfo[0], getDimension = dimensionInfo[1];
+        // %3 = getelementptr [5 x [7 x i32]], [5 x [7 x i32]]* @a, i32 0, i32 3, i32 4 二维数组取两维
+        // %60 = getelementptr inbounds [2 x [2 x i32]], [2 x [2 x i32]]* %26, i64 0, i64 0 二维数组取一维
+        // 一维数组只能取一维
+        // 取到的类型
+        String getType;
+        // 当取二维数组时,取到其innerDim的指针
+        // 取二维数组的第一个维度还是第二个维度是一样的,无非是只改变dim[0]
+        // 还是dim[0],dim[1]都改变,取到的都是I32POINT
+        if (dimension == 2 && getDimension == 0) {
+            getType = innerDim + "*";
+        }
+        else {
+            getType = I32POINT;
+        }
+        String tmp = alloc(getType).getLlvmName();
         StringJoiner stringJoiner = new StringJoiner(", ");
-        stringJoiner.add("tmp = getelementptr " + arrType);
+        stringJoiner.add(TAB + tmp + " = getelementptr " + arrType);
         stringJoiner.add(arrType + "* " + arrName);
         stringJoiner.add(I32 + " 0");
-        stringJoiner.add(I32 + " " + dimOne);
-        if (dimension == 2) {
-            stringJoiner.add(I32 + " " + dimTwo);
+        stringJoiner.add(I32 + " " + dim[0]);
+        // 当取二维数组且不是取整个数组时
+        if (dimension == 2 && getDimension != 0) {
+            stringJoiner.add(I32 + " " + dim[1]);
         }
         instruction.addInstruction(stringJoiner.toString());
         instruction.setLlvmName(tmp);
@@ -567,7 +588,7 @@ public class Generator {
         else {
             // 一维
             if (size == 1) {
-                initArr(constInitValNode, initValNode, stringJoiner, size, isConst, null);
+                initGlobalArr(constInitValNode, initValNode, stringJoiner, size, isConst, null);
             }
             // 二维
             else {
@@ -576,7 +597,7 @@ public class Generator {
                 // 常量的初值表达式
                 if (isConst) {
                     for (ConstInitValNode ele : constInitValNode.getConstInitValNodes()) {
-                        boolean innerFlag = initArr(ele, null, initValSj, Integer.parseInt(dim[1]), true, innerDim);
+                        boolean innerFlag = initGlobalArr(ele, null, initValSj, Integer.parseInt(dim[1]), true, innerDim);
                         if (!innerFlag) {
                             allZeroFlag = false;
                         }
@@ -585,7 +606,7 @@ public class Generator {
                 // 变量的初值表达式
                 else {
                     for (InitValNode ele : initValNode.getInitValNodes()) {
-                        boolean innerFlag = initArr(null, ele, initValSj, Integer.parseInt(dim[1]), false, innerDim);
+                        boolean innerFlag = initGlobalArr(null, ele, initValSj, Integer.parseInt(dim[1]), false, innerDim);
                         if (!innerFlag) {
                             allZeroFlag = false;
                         }
@@ -914,6 +935,67 @@ public class Generator {
         ret.add(RBRACE);
     }
 
+    /**
+     * 初始化局部数组
+     */
+    public void initLocalArr(ConstInitValNode constInitValNode, InitValNode initValNode, Instruction instruction, ArrInfo arrInfo, String dimOne, String dimTwo) {
+        // 获取初始值
+        Instruction addExpInstruction;
+        if (constInitValNode != null) {
+            addExpInstruction = addExpHandler(constInitValNode.getConstExpNode().getAddExpNode(), true);
+        }
+        else {
+            addExpInstruction = addExpHandler(initValNode.getExpNode().getAddExpNode(), true);
+        }
+        instruction.addInstruction(addExpInstruction.toString());
+        String sName = addExpInstruction.getLlvmName();
+        // 取出数组元素,对于数组初始化来说,要获取的维数和数组维数是一样的
+        String[] dim = {dimOne, dimTwo};
+        Instruction elementPtr = getElementPtr(arrInfo, dim);
+        instruction.addInstruction(elementPtr.toString());
+        String dName = elementPtr.getLlvmName();
+        // 将初始值存入
+        String store = store(I32, sName, I32POINT, dName);
+        instruction.addInstruction(store);
+    }
+
+    /**
+     * 拼接数组函数调用所用信息对象
+     * @return 函数信息对象
+     */
+    public ArrInfo getArrInfo(ConstDefNode constDefNode, VarDefNode varDefNode, Instruction instruction, int[] dimInt) {
+        List<ConstExpNode> constExpNodes;
+        // 定义数组维度的ConstExp
+        if (constDefNode != null) {
+            constExpNodes = constDefNode.getConstExpNodes();
+        }
+        else {
+            constExpNodes = varDefNode.getConstExpNodes();
+        }
+        // 数组维数
+        int size = constExpNodes.size();
+        // 计算各个维度维数
+        String[] dimStr = {"0", "0"};
+        String[] dimRet = dimHandler(dimStr, size, constExpNodes);
+        String innerDim = dimRet[0];
+        String llvmType = dimRet[1];
+
+        dimInt[0] = Integer.parseInt(dimStr[0]);
+        dimInt[1] = Integer.parseInt(dimStr[1]);
+
+        // 申请局部变量
+        AllocElement alloc = alloc(llvmType);
+        String llvmName = alloc.getLlvmName();
+        instruction.addInstruction(alloc.getInstruction());
+
+        // 拼装函数调用数组 [innerDim, arrType, arrName]
+        String[] arrSymbolInfo = {innerDim, llvmType, llvmName};
+        // 用于初始化的调用,获取维数与数组维数相同
+        int[] dimensionInfo = {size, size};
+        return new ArrInfo(arrSymbolInfo, dimensionInfo);
+    }
+
+
     public Instruction blockItemHandler(BlockItemNode blockItemNode, boolean ifFlag, boolean elseFlag, boolean forFlag) {
         // 指令集合
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
@@ -948,56 +1030,28 @@ public class Generator {
                             // 记录store指令 store i32 %0, i32 * %4
                             instruction.addInstruction(store(I32, sName, I32POINT, llvmName));
                         }
-
                     }
                     // 数组
                     else {
-                        // 计算各个维度维数
-                        String[] dim = {"0", "0"};
-                        String[] dimRet = dimHandler(dim, size, varDefNode.getConstExpNodes());
-                        llvmType = dimRet[1];
-                        int dimOne = Integer.parseInt(dim[0]);
-                        int dimTwo = Integer.parseInt(dim[1]);
-
-                        // 申请局部变量
-                        AllocElement alloc = alloc(llvmType);
-                        llvmName = alloc.getLlvmName();
-                        instruction.addInstruction(alloc.getInstruction());
-
-                        // 是否有初值
+                        int[] dimInt = {0, 0};
+                        ArrInfo arrInfo = getArrInfo(null, varDefNode, instruction, dimInt);
+                        llvmName = arrInfo.getArrSymbolInfo()[1];
+                        llvmType = arrInfo.getArrSymbolInfo()[2];
+                        // 有初始值
                         if (initValNode != null) {
                             if (size == 1) {
-                                for (int i=0; i<dimOne; i++) {
-                                    // 获取初始值
+                                for (int i=0; i<dimInt[0]; i++) {
                                     InitValNode ele = initValNode.getInitValNodes().get(i);
-                                    Instruction addExpInstruction = addExpHandler(ele.getExpNode().getAddExpNode(), true);
-                                    instruction.addInstruction(addExpInstruction.toString());
-                                    String sName = addExpInstruction.getLlvmName();
-                                    // 取出数组元素
-                                    Instruction elementPtr = getElementPtr(llvmType, llvmName, String.valueOf(i), null, 1);
-                                    instruction.addInstruction(elementPtr.toString());
-                                    String dName = elementPtr.getLlvmName();
-                                    // 将初始值存入
-                                    String store = store(I32, sName, I32POINT, dName);
-                                    instruction.addInstruction(store);
+                                    initLocalArr(null, ele, instruction, arrInfo, String.valueOf(i), null);
                                 }
                             }
                             else {
-                                for (int i=0; i<dimOne; i++) {
+                                for (int i=0; i<dimInt[0]; i++) {
                                     InitValNode eleOne = initValNode.getInitValNodes().get(i);
-                                    for (int j=0; j<dimTwo; j++) {
+                                    for (int j=0; j<dimInt[1]; j++) {
                                         // 获取初始值
                                         InitValNode eleTwo = eleOne.getInitValNodes().get(j);
-                                        Instruction addExpInstruction = addExpHandler(eleTwo.getExpNode().getAddExpNode(), true);
-                                        instruction.addInstruction(addExpInstruction.toString());
-                                        String sName = addExpInstruction.getLlvmName();
-                                        // 取出数组元素
-                                        Instruction elementPtr = getElementPtr(llvmType, llvmName, String.valueOf(i), String.valueOf(j), 2);
-                                        instruction.addInstruction(elementPtr.toString());
-                                        String dName = elementPtr.getLlvmName();
-                                        // 将初始值存入
-                                        String store = store(I32, sName, I32POINT, dName);
-                                        instruction.addInstruction(store);
+                                        initLocalArr(null, eleTwo, instruction, arrInfo, String.valueOf(i), String.valueOf(j));
                                     }
                                 }
                             }
@@ -1043,50 +1097,25 @@ public class Generator {
                     }
                     // 数组
                     else {
-                        // 计算各个维度维数
-                        String[] dim = {"0", "0"};
-                        String[] dimRet = dimHandler(dim, size, constDefNode.getConstExpNodes());
-                        llvmType = dimRet[1];
-                        int dimOne = Integer.parseInt(dim[0]);
-                        int dimTwo = Integer.parseInt(dim[1]);
-
-                        // 申请局部变量
-                        AllocElement alloc = alloc(llvmType);
-                        llvmName = alloc.getLlvmName();
-                        instruction.addInstruction(alloc.getInstruction());
+                        int[] dimInt = {0, 0};
+                        ArrInfo arrInfo = getArrInfo(constDefNode, null, instruction, dimInt);
+                        llvmName = arrInfo.getArrSymbolInfo()[1];
+                        llvmType = arrInfo.getArrSymbolInfo()[2];
 
                         if (size == 1) {
-                            for (int i=0; i<dimOne; i++) {
+                            for (int i=0; i<dimInt[0]; i++) {
                                 // 获取初始值
                                 ConstInitValNode ele = constInitValNode.getConstInitValNodes().get(i);
-                                Instruction addExpInstruction = addExpHandler(ele.getConstExpNode().getAddExpNode(), true);
-                                instruction.addInstruction(addExpInstruction.toString());
-                                String sName = addExpInstruction.getLlvmName();
-                                // 取出数组元素
-                                Instruction elementPtr = getElementPtr(llvmType, llvmName, String.valueOf(i), null, 1);
-                                instruction.addInstruction(elementPtr.toString());
-                                String dName = elementPtr.getLlvmName();
-                                // 将初始值存入
-                                String store = store(I32, sName, I32POINT, dName);
-                                instruction.addInstruction(store);
+                                initLocalArr(ele, null, instruction, arrInfo, String.valueOf(i), null);
                             }
                         }
                         else {
-                            for (int i=0; i<dimOne; i++) {
+                            for (int i=0; i<dimInt[0]; i++) {
                                 ConstInitValNode eleOne = constInitValNode.getConstInitValNodes().get(i);
-                                for (int j=0; j<dimTwo; j++) {
+                                for (int j=0; j<dimInt[1]; j++) {
                                     // 获取初始值
                                     ConstInitValNode eleTwo = eleOne.getConstInitValNodes().get(j);
-                                    Instruction addExpInstruction = addExpHandler(eleTwo.getConstExpNode().getAddExpNode(), true);
-                                    instruction.addInstruction(addExpInstruction.toString());
-                                    String sName = addExpInstruction.getLlvmName();
-                                    // 取出数组元素
-                                    Instruction elementPtr = getElementPtr(llvmType, llvmName, String.valueOf(i), String.valueOf(j), 2);
-                                    instruction.addInstruction(elementPtr.toString());
-                                    String dName = elementPtr.getLlvmName();
-                                    // 将初始值存入
-                                    String store = store(I32, sName, I32POINT, dName);
-                                    instruction.addInstruction(store);
+                                    initLocalArr(eleTwo, null, instruction, arrInfo, String.valueOf(i), String.valueOf(j));
                                 }
                             }
                         }
@@ -1110,20 +1139,28 @@ public class Generator {
     }
 
     /**
-     * 数组LVal赋值处理
+     * 数组LVal
      */
-    public void arrLValHandler(int dimension, LValNode lValNode, Symbol symbol, String sName, Instruction instruction) {
+    public void arrLValHandler(LValNode lValNode, Symbol symbol, String sName, Instruction instruction) {
         // LVal → Ident {'[' Exp ']'}
         String[] dim = {"0", "0"};
         Instruction addExpInstruction;
-        for (int i=0; i<dimension; i++) {
-            ExpNode expNode = lValNode.getExpNodes().get(i);
+        // 数组维数
+        List<ExpNode> expNodes = lValNode.getExpNodes();
+        // 要获取的维数
+        int getDimension = expNodes.size();
+        for (int i=0; i<getDimension; i++) {
+            ExpNode expNode = expNodes.get(i);
             addExpInstruction = addExpHandler(expNode.getAddExpNode(), true);
             instruction.addInstruction(addExpInstruction.toString());
             dim[i] = addExpInstruction.getLlvmName();
         }
+        String[] arrSymbolInfo = {symbol.getInnerDim(), symbol.getLlvmType(), symbol.getName()};
+        int[] dimensionInfo = {symbol.getDimension(), getDimension};
+        ArrInfo arrInfo = new ArrInfo(arrSymbolInfo, dimensionInfo);
+
         // 取出数组元素
-        Instruction elementPtr = getElementPtr(symbol.getLlvmType(), symbol.getLlvmName(), dim[0], dim[1], symbol.getDimension());
+        Instruction elementPtr = getElementPtr(arrInfo, dim);
         instruction.addInstruction(elementPtr.toString());
         String dName = elementPtr.getLlvmName();
         // 存入值
@@ -1190,7 +1227,7 @@ public class Generator {
                 }
                 // 数组
                 else {
-                    arrLValHandler(dimension, lValNode, symbol, sName, instruction);
+                    arrLValHandler(lValNode, symbol, sName, instruction);
                 }
                 break;
             case PRINT:
@@ -1577,7 +1614,7 @@ public class Generator {
                 }
                 // 数组
                 else {
-                    arrLValHandler(dimension, lValNode, symbol, rVal, instruction);
+                    arrLValHandler(lValNode, symbol, rVal, instruction);
                 }
                 break;
             case RETURN:
@@ -1623,7 +1660,7 @@ public class Generator {
         }
         // 数组
         else {
-            arrLValHandler(dimension, lValNode, valSymbol, rVal, instruction);
+            arrLValHandler(lValNode, valSymbol, rVal, instruction);
         }
         return instruction;
     }
@@ -1978,35 +2015,49 @@ public class Generator {
             // 或许可以直接返回符号对应的值
             // 找到其对应标号,进行load
             LValNode lValNode = primaryExpNode.getlValNode();
-            int size = lValNode.getExpNodes().size();
+            int getDimension = lValNode.getExpNodes().size();
             String name = lValNode.getIdentToken().getValue();
             // 可能是ValSymbol或FuncParamSymbol
             Symbol symbol = findSymbol(name);
             String llvmName = symbol.getLlvmName();
+            String retName;
             Instruction instruction = new Instruction(null, new StringJoiner("\n"));
             // size不可以用来判断是否是数组,得用symbol
             int dimension = symbol.getDimension();
             if (dimension == 0) {
                 // 非数组
                 AllocElement alloc = load(I32, llvmName);
-                String allocLlvmName = alloc.getLlvmName();
+                retName = alloc.getLlvmName();
                 instruction.addInstruction(alloc.getInstruction());
-                instruction.setLlvmName(allocLlvmName);
+                instruction.setLlvmName(retName);
             }
             else if (dimension > 0){
                 // 数组
                 String[] dim = {"0", "0"};
-                for (int i=0; i<size; i++) {
+                for (int i=0; i<getDimension; i++) {
                     ExpNode expNode = lValNode.getExpNodes().get(i);
                     Instruction addExpInstruction = addExpHandler(expNode.getAddExpNode(), true);
                     instruction.addInstruction(addExpInstruction.toString());
                     dim[i] = addExpInstruction.getLlvmName();
                 }
-                Instruction elementPtr = getElementPtr(symbol.getLlvmType(), symbol.getLlvmName(), dim[0], dim[1], dimension);
+                // 组装函数调用所用信息
+                String[] arrSymbolInfo = {symbol.getInnerDim(), symbol.getLlvmType(), symbol.getLlvmName()};
+                int[] dimensionInfo = {dimension, getDimension};
+                ArrInfo arrInfo = new ArrInfo(arrSymbolInfo, dimensionInfo);
+
+                Instruction elementPtr = getElementPtr(arrInfo, dim);
                 instruction.addInstruction(elementPtr.toString());
-                AllocElement load = load(I32, elementPtr.getLlvmName());
-                instruction.addInstruction(load.getInstruction());
-                instruction.setLlvmName(load.getLlvmName());
+                // 数组lVal,只有获取维度等于数组维度的才load
+                if (dimension == getDimension) {
+                    AllocElement load = load(I32, elementPtr.getLlvmName());
+                    instruction.addInstruction(load.getInstruction());
+                    retName = load.getLlvmName();
+                }
+                // 否则直接返回获取到的数组地址即可
+                else {
+                    retName = elementPtr.getLlvmName();
+                }
+                instruction.setLlvmName(retName);
             }
             return instruction;
         }

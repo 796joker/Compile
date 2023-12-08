@@ -8,6 +8,16 @@ public class Symbol {
     private String llvmName = null;
     private String llvmType = null;
     private int dimension = -1;
+    private String innerDim = null;
+
+    public void setInnerDim(String innerDim) {
+        this.innerDim = innerDim;
+    }
+
+    public String getInnerDim() {
+        return innerDim;
+    }
+
     public void setLlvmType(String llvmType) {
         this.llvmType = llvmType;
     }
