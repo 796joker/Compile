@@ -184,7 +184,7 @@ public class Instruction {
                     needBackInstruction.unionNeedBack();
                 }
                 // 加入指令集中
-                instructions.add(needBackInstruction.toString());
+                addInstruction(needBackInstruction.toString());
             }
             // 回填完进行标记
             isBlock = false;

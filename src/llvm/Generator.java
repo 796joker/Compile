@@ -34,15 +34,15 @@ public class Generator {
     private static final String TAB = "    ";
 
     /**
-     * 记录当前的for是否有直接跳转
+     * 记录当前的forBody是否有直接跳转
      */
     Stack<Boolean> forJump;
     /**
-     * 记录当前的if是否有直接跳转
+     * 记录当前的ifBody是否有直接跳转
      */
     Stack<Boolean> ifJump;
     /**
-     * 记录当前的else是否有直接跳转
+     * 记录当前的elseBody是否有直接跳转
      */
     Stack<Boolean> elseJump;
 
@@ -190,18 +190,31 @@ public class Generator {
      * 进行非运算
      */
     public Instruction not(String name) {
-        String localValType = getLocalValType(name);
-        // 不是条件表达式结果而是一个整数值
-        // %12 = load i32, i32* %2, align 4
-        //  %13 = icmp ne i32 %12, 0
-        //  %14 = xor i1 %13, true
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
+        String localValType = getLocalValType(name);
+        // 如果是一个常数,非零返回1;否则返回1
+        int constInt;
+        try {
+            constInt = Integer.parseInt(name);
+            if (constInt != 0) {
+                instruction.setLlvmName("0");
+            }
+            else {
+                instruction.setLlvmName("1");
+            }
+            return instruction;
+        }
+        catch (Exception e) {
+            constInt = 0;
+        }
         if (Objects.equals(localValType, I32)) {
-            // 加载此变量
-            AllocElement loadAlloc = load(I32, name);
-            instruction.addInstruction(loadAlloc.getInstruction());
-            // 不为零则为真
-            AllocElement icmpAlloc = icmp(TokenType.NEQ, loadAlloc.getLlvmName(), "0");
+            // 不是条件表达式结果而是一个整数值
+            // %12 = load i32, i32* %2, align 4
+            //  %13 = icmp ne i32 %12, 0
+            //  %14 = xor i1 %13, true
+            // 传来的变量已经load了,直接用; 不为零则为真
+            AllocElement icmpAlloc = icmp(TokenType.NEQ, name, "0");
+            instruction.addInstruction(icmpAlloc.getInstruction());
             // 申请临时变量,无需加入申请指令
             AllocElement allocAlloc = alloc(I1);
             String tmp = allocAlloc.getLlvmName();
@@ -441,12 +454,15 @@ public class Generator {
      * @param size 初始值数量,即此维度的长度
      * @param stringJoiner 指令拼装者
      */
-    public boolean initGlobalArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, int size, boolean isConst, String innerDim) {
+    public boolean initGlobalArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, boolean isConst, String innerDim) {
         boolean allZeroFlag = true;
         ArrayList<Integer> initValList = new ArrayList<>();
+        int size;
         int initVal;
         if (isConst) {
-            for (ConstInitValNode ele : constInitValNode.getConstInitValNodes()) {
+            List<ConstInitValNode> constInitValNodes = constInitValNode.getConstInitValNodes();
+            size = constInitValNodes.size();
+            for (ConstInitValNode ele : constInitValNodes) {
                 initVal = constAddExpHandler(ele.getConstExpNode().getAddExpNode());
                 if (initVal != 0) {
                     allZeroFlag = false;
@@ -455,7 +471,9 @@ public class Generator {
             }
         }
         else {
-            for (InitValNode ele : initValNode.getInitValNodes()) {
+            List<InitValNode> initValNodes = initValNode.getInitValNodes();
+            size = initValNodes.size();
+            for (InitValNode ele : initValNodes) {
                 initVal = constAddExpHandler(ele.getExpNode().getAddExpNode());
                 if (initVal != 0) {
                     allZeroFlag = false;
@@ -500,9 +518,11 @@ public class Generator {
         for (DeclNode declNode : declNodes) {
             ret.add(globalDeclHandler(declNode).toString());
         }
+        ret.add("");
         List<FuncDefNode> funcDefNodes = compUnitNode.getFuncDefNodes();
         for (FuncDefNode funcDefNode : funcDefNodes) {
             ret.add(funcDefHandler(funcDefNode).toString());
+            ret.add("");
         }
         // 主函数中指令已经加入到ret中了
         MainFuncDefNode mainFuncDefNode = compUnitNode.getMainFuncDefNode();
@@ -511,19 +531,20 @@ public class Generator {
 
     /**
      * 处理数组维度
+     * @param dimension 数组维数
      * @return ret[innerDim, llvmType]
      */
-    public String[] dimHandler(String[] dim, int size, List<ConstExpNode> constExpNodes) {
+    public String[] dimHandler(String[] dim, int dimension, List<ConstExpNode> constExpNodes) {
         // 计算各个维度维数
         String llvmType;
-        for (int i=0; i<size; i++) {
+        for (int i=0; i<dimension; i++) {
             ConstExpNode constExpNode = constExpNodes.get(i);
             dim[i] = String.valueOf(constAddExpHandler(constExpNode.getAddExpNode()));
         }
         // 记录维度
         // 内层维度,一维即本身,二维是第二维的维度
         String innerDim = null;
-        if (size == 1) {
+        if (dimension == 1) {
             llvmType = "[" + dim[0] + " x " + I32 + "]";
         }
         else {
@@ -551,18 +572,38 @@ public class Generator {
         String getType;
         // 当取二维数组时,取到其innerDim的指针
         // 取二维数组的第一个维度还是第二个维度是一样的,无非是只改变dim[0]
-        // 还是dim[0],dim[1]都改变,取到的都是I32POINT
+        // 还是dim[0],dim[1]都改变,取到的都是I32POINT,一维数组也一样
         if (dimension == 2 && getDimension == 0) {
             getType = innerDim + "*";
         }
         else {
             getType = I32POINT;
         }
+
+        // 注意,对于函数参数中的数组来说,由于不能使用**的形式,所以需要先load一次
+        // %7 = load i32*, i32** %5, align 8
+        // %8 = getelementptr inbounds i32, i32* %7, i64 0
+        // %10 = load [2 x i32]*, [2 x i32]** %6, align 8
+        // %11 = getelementptr inbounds [2 x i32], [2 x i32]* %10, i64 0
+        // %12 = getelementptr inbounds [2 x i32], [2 x i32]* %11, i64 0, i64 0
+        // 是否属于参数类型数组
+        boolean isParamArr = arrType.contains("*");
+        if (isParamArr) {
+            AllocElement load = load(arrType, arrName);
+            instruction.addInstruction(load.getInstruction());
+            // 用加载好的arrName替换
+            arrName = load.getLlvmName();
+            // 加载后去除*
+            arrType = arrType.replace("*", "");
+        }
         String tmp = alloc(getType).getLlvmName();
         StringJoiner stringJoiner = new StringJoiner(", ");
         stringJoiner.add(TAB + tmp + " = getelementptr " + arrType);
         stringJoiner.add(arrType + "* " + arrName);
-        stringJoiner.add(I32 + " 0");
+        // 对于参数类型数组来说,由于维度减少了,步长需要减少一步
+        if (!isParamArr) {
+            stringJoiner.add(I32 + " 0");
+        }
         stringJoiner.add(I32 + " " + dim[0]);
         // 当取二维数组且不是取整个数组时
         if (dimension == 2 && getDimension != 0) {
@@ -575,12 +616,12 @@ public class Generator {
 
     /**
      * 数组处理函数
-     * @param size ConstExp数量,即数组维度数量
+     * @param dimension ConstExp数量,即数组维数
      */
-    public String arrHandler(StringJoiner stringJoiner, List<ConstExpNode> constExpNodes, int size, InitValNode initValNode, ConstInitValNode constInitValNode, boolean isConst) {
+    public String arrHandler(StringJoiner stringJoiner, List<ConstExpNode> constExpNodes, int dimension, InitValNode initValNode, ConstInitValNode constInitValNode, boolean isConst) {
         // VarDef → Ident { '[' ConstExp ']' } | Ident { '[' ConstExp ']' } '=' InitVal
         String[] dim = {"0", "0"};
-        String[] dimRet = dimHandler(dim, size, constExpNodes);
+        String[] dimRet = dimHandler(dim, dimension, constExpNodes);
         String innerDim = dimRet[0];
         String llvmType = dimRet[1];
         // 指令拼接类型
@@ -592,8 +633,8 @@ public class Generator {
         // 有初值
         else {
             // 一维
-            if (size == 1) {
-                initGlobalArr(constInitValNode, initValNode, stringJoiner, size, isConst, null);
+            if (dimension == 1) {
+                initGlobalArr(constInitValNode, initValNode, stringJoiner, isConst, null);
             }
             // 二维
             else {
@@ -602,7 +643,7 @@ public class Generator {
                 // 常量的初值表达式
                 if (isConst) {
                     for (ConstInitValNode ele : constInitValNode.getConstInitValNodes()) {
-                        boolean innerFlag = initGlobalArr(ele, null, initValSj, Integer.parseInt(dim[1]), true, innerDim);
+                        boolean innerFlag = initGlobalArr(ele, null, initValSj, true, innerDim);
                         if (!innerFlag) {
                             allZeroFlag = false;
                         }
@@ -611,7 +652,7 @@ public class Generator {
                 // 变量的初值表达式
                 else {
                     for (InitValNode ele : initValNode.getInitValNodes()) {
-                        boolean innerFlag = initGlobalArr(null, ele, initValSj, Integer.parseInt(dim[1]), false, innerDim);
+                        boolean innerFlag = initGlobalArr(null, ele, initValSj, false, innerDim);
                         if (!innerFlag) {
                             allZeroFlag = false;
                         }
@@ -812,8 +853,8 @@ public class Generator {
         StringJoiner funcDef = new StringJoiner(" ", "", "");
         funcDef.add("define").add("dso_local");
         // 函数返回值类型
-        FuncTypeNode funcTypeNode = funcDefNode.getFuncTypeNode();
-        if (funcTypeNode.getToken().getType() == TokenType.VOIDTK) {
+        TokenType funcType = funcDefNode.getFuncTypeNode().getToken().getType();
+        if (funcType == TokenType.VOIDTK) {
             funcDef.add("void");
         }
         else {
@@ -880,6 +921,7 @@ public class Generator {
                 // 记录到符号表中
                 String funcFParamName = funcFParamNode.getIdentToken().getValue();
                 defName = funcFParamName;
+                // 标记参数load后临时变量的名字
                 findSymbol(funcFParamName).setLlvmName(dName);
                 defName = null;
                 // 记录到局部变量表中
@@ -906,6 +948,20 @@ public class Generator {
                 block.unionNeedBack();
             }
             instruction.addInstruction(block.toString());
+        }
+        // 如果void函数最后一句未显式给出返回语句,需要手动添加
+        if (funcType == TokenType.VOIDTK) {
+            int size = blockItemNodes.size();
+            // TODO 空函数体,可优化
+            if (size == 0) {
+                instruction.addInstruction(TAB + "ret void");
+            }
+            else {
+                BlockItemNode lastBlockItem = blockItemNodes.get(size - 1);
+                if (lastBlockItem.getStmtNode() == null || lastBlockItem.getStmtNode().getStmtType() != StmtNode.StmtType.RETURN) {
+                    instruction.addInstruction(TAB + "ret void");
+                }
+            }
         }
         instruction.addInstruction(RBRACE);
         // 结束函数分析,SymbolTable回退,出栈当前符号表的孩子符号
@@ -1040,8 +1096,8 @@ public class Generator {
                     else {
                         int[] dimInt = {0, 0};
                         ArrInfo arrInfo = getArrInfo(null, varDefNode, instruction, dimInt);
-                        llvmName = arrInfo.getArrSymbolInfo()[1];
-                        llvmType = arrInfo.getArrSymbolInfo()[2];
+                        llvmType = arrInfo.getArrSymbolInfo()[1];
+                        llvmName = arrInfo.getArrSymbolInfo()[2];
                         // 有初始值
                         if (initValNode != null) {
                             if (size == 1) {
@@ -1104,8 +1160,8 @@ public class Generator {
                     else {
                         int[] dimInt = {0, 0};
                         ArrInfo arrInfo = getArrInfo(constDefNode, null, instruction, dimInt);
-                        llvmName = arrInfo.getArrSymbolInfo()[1];
-                        llvmType = arrInfo.getArrSymbolInfo()[2];
+                        llvmType = arrInfo.getArrSymbolInfo()[1];
+                        llvmName = arrInfo.getArrSymbolInfo()[2];
 
                         if (size == 1) {
                             for (int i=0; i<dimInt[0]; i++) {
@@ -1160,7 +1216,7 @@ public class Generator {
             instruction.addInstruction(addExpInstruction.toString());
             dim[i] = addExpInstruction.getLlvmName();
         }
-        String[] arrSymbolInfo = {symbol.getInnerDim(), symbol.getLlvmType(), symbol.getName()};
+        String[] arrSymbolInfo = {symbol.getInnerDim(), symbol.getLlvmType(), symbol.getLlvmName()};
         int[] dimensionInfo = {symbol.getDimension(), getDimension};
         ArrInfo arrInfo = new ArrInfo(arrSymbolInfo, dimensionInfo);
 
@@ -1331,9 +1387,15 @@ public class Generator {
                 // ifBody, 默认无直接跳转
                 ifJump.push(false);
                 String ifBodyLabel = allocLabel();
+                // 若是Block类型,可能需要回填
+                StmtNode forStmtNode = stmtNode.getStmtNodes().get(0);
                 Instruction ifBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(0), true, false, false);
                 // 若是Block类型,标记;此时ifBodyInstructions本身已经有标记
                 boolean ifBodyB = ifBodyInstructions.isBlock();
+                // 若不是Block类型, Continue和Break也要归类为Blcok类型
+                if (forStmtNode.getStmtType() == StmtNode.StmtType.BREAK || forStmtNode.getStmtType() == StmtNode.StmtType.CONTINUE) {
+                    ifBodyB = true;
+                }
                 // 此处若是Block类型,其所有指令存储在ifBodyInstructions.needBackInstructions中
 
                 // elseBody
@@ -1642,6 +1704,19 @@ public class Generator {
                 else {
                     // 无返回值
                     instruction.addInstruction(TAB + "ret void");
+                }
+                // 若是在ifBody.elseBody.forBody里,要打上跳转标记
+                if (ifFlag) {
+                    ifJump.pop();
+                    ifJump.push(true);
+                }
+                if (elseFlag) {
+                    elseJump.pop();
+                    elseJump.push(true);
+                }
+                if (forFlag) {
+                    forJump.pop();
+                    forJump.push(true);
                 }
                 break;
             default:
