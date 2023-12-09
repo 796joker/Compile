@@ -34,10 +34,16 @@ public class Generator {
     private static final String TAB = "    ";
 
     /**
-     * 记录当前的for,if,else是否有直接跳转
+     * 记录当前的for是否有直接跳转
      */
     Stack<Boolean> forJump;
+    /**
+     * 记录当前的if是否有直接跳转
+     */
     Stack<Boolean> ifJump;
+    /**
+     * 记录当前的else是否有直接跳转
+     */
     Stack<Boolean> elseJump;
 
     /**
@@ -196,13 +202,12 @@ public class Generator {
             instruction.addInstruction(loadAlloc.getInstruction());
             // 不为零则为真
             AllocElement icmpAlloc = icmp(TokenType.NEQ, loadAlloc.getLlvmName(), "0");
-            // 申请临时变量
+            // 申请临时变量,无需加入申请指令
             AllocElement allocAlloc = alloc(I1);
             String tmp = allocAlloc.getLlvmName();
-            instruction.addInstruction(allocAlloc.getInstruction());
             // 进行取反
             StringJoiner stringJoiner = new StringJoiner(" ");
-            stringJoiner.add(tmp).add("=").add("xor").add(I1).add(icmpAlloc.getLlvmName() + ",").add("true");
+            stringJoiner.add(TAB + tmp).add("=").add("xor").add(I1).add(icmpAlloc.getLlvmName() + ",").add("true");
             // 加入取反指令
             instruction.addInstruction(stringJoiner.toString());
             // 设置返回值
@@ -1313,12 +1318,17 @@ public class Generator {
                 //  'if' '(' Cond ')' Stmt [ 'else' Stmt ]
 
                 // 记录条件类型,以便条件表达式处理子程序进行跳转
-                condTypes.push(CondType.IF);
+                if (stmtNode.getElesToken() == null) {
+                    condTypes.push(CondType.IF);
+                }
+                else {
+                    condTypes.push(CondType.IF_ELSE);
+                }
 
                 // Cond, ifCond是不用直接跳转的,按顺序分析即可
                 List<Instruction> ifCondInstructions = lOrExpHandler(stmtNode.getCondNode().getlOrExpNode());
 
-                // ifBody
+                // ifBody, 默认无直接跳转
                 ifJump.push(false);
                 String ifBodyLabel = allocLabel();
                 Instruction ifBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(0), true, false, false);
@@ -1350,11 +1360,12 @@ public class Generator {
                     String nextLOrLabel = ifCondInstruction.getNextLOrLabel();
                     String cond = ifCondInstruction.getLlvmName();
                     switch (ifCondInstruction.getConditionJumpType()) {
-                        case IAN -> ifCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, ifBodyLabel).toString());
+                        case IAN -> ifCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, nextLabel).toString());
                         case IAO, IEAO -> ifCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, nextLOrLabel).toString());
                         case IBN -> ifCondInstruction.addInstruction(conditionalJump(cond, ifBodyLabel, nextLabel).toString());
                         case IBO, IEBO -> ifCondInstruction.addInstruction(conditionalJump(cond, ifBodyLabel, nextLOrLabel).toString());
                         case IEAE -> ifCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, elseBodyLabel).toString());
+                        case IEBE -> ifCondInstruction.addInstruction(conditionalJump(cond, ifBodyLabel, elseBodyLabel).toString());
                     }
                 }
                 // 如果当前if语句已经有跳转语句,不用回填
