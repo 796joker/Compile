@@ -26,4 +26,8 @@ public class ErrorHandler {
     public List<DefError> getErrorList() {
         return errorList;
     }
+
+    public boolean ifErrorExist() {
+        return this.errorList.size() == 0;
+    }
 }

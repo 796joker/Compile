@@ -1,8 +1,9 @@
 import error.ErrorHandler;
-import frontend.Lexer;
-import frontend.Parser;
 import utils.Analyzer;
 
+/**
+ * @author AS
+ */
 public class Compiler {
     public static void main(String[] args)  {
         // ErrorHandle init
@@ -12,8 +13,10 @@ public class Compiler {
         // Parser Step
         Analyzer.parserAnalyze(false);
         // SymbolAndError
-        Analyzer.symbolAnalyze(false);
-        // IR
-        Analyzer.llvmIRAnalyze(true);
+        Analyzer.symbolAnalyze(true);
+        if (ErrorHandler.getErrorHandler().ifErrorExist()) {
+            // IR (没有编译错误才进行目标代码生成)
+            Analyzer.llvmIRAnalyze(true);
+        }
     }
 }
