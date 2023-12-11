@@ -4,9 +4,11 @@ import java.util.List;
 import java.util.Objects;
 import java.util.StringJoiner;
 
+import static llvm.Utils.conditionalJump;
+
 public class Instruction {
     private String llvmName;
-    private StringJoiner instructions;
+    private final StringJoiner instructions;
 
     private String nextLOrLabel = null;
 
@@ -14,6 +16,9 @@ public class Instruction {
 
     private ConditionJumpType conditionJumpType = ConditionJumpType.NONE;
 
+    /**
+     * 下一个该跳转的label,是对于eqExp来说的
+     */
     private String nextLabel = null;
 
     private boolean isBlock = false;
@@ -175,6 +180,9 @@ public class Instruction {
         }
     }
 
+    /**
+     * 统合已经回填完毕的Block类型的指令
+     */
     public void unionNeedBack() {
         // 如果是Block块的Instruction,需要在回填完成后统合所有指令
         if (isBlock) {
@@ -190,5 +198,19 @@ public class Instruction {
             isBlock = false;
         }
     }
+
+    /**
+     * 进行条件跳转的回填
+     */
+    public void backFillConditionalJump(String forBodyLabel, String nextLabel) {
+        // 对于条件语句指令来说,其cond为llvmName
+        switch (conditionJumpType) {
+            case FAN -> addInstruction(conditionalJump(llvmName, nextLAndLabel, nextLabel).toString());
+            case FAO -> addInstruction(conditionalJump(llvmName, nextLAndLabel, nextLOrLabel).toString());
+            case FBN -> addInstruction(conditionalJump(llvmName, forBodyLabel, nextLabel).toString());
+            case FBO -> addInstruction(conditionalJump(llvmName, forBodyLabel, nextLOrLabel).toString());
+        }
+    }
+
 
 }

@@ -2,10 +2,16 @@ package llvm;
 
 import frontend.Parser;
 import node.*;
-import symbol.*;
+import symbol.FuncParamSymbol;
+import symbol.FuncSymbol;
+import symbol.Symbol;
+import symbol.ValSymbol;
 import token.TokenType;
 
 import java.util.*;
+
+import static llvm.Utils.conditionalJump;
+import static llvm.Utils.unconditionalJump;
 
 /**
  * @author AS
@@ -28,10 +34,17 @@ public class Generator {
 
     private static final String LBRACE = "{";
     private static final String RBRACE = "}";
-    private static final String BR = "br";
-    private static final String LABEL = "label";
-    private static final String COMMA = ",";
+
     private static final String TAB = "    ";
+
+    /**
+     * BackFill类实例
+     */
+    private static final BackFill BACK_FILL = BackFill.getBackFill();
+    /**
+     * Utils工具类实例
+     */
+    private static final Utils UTILS = Utils.getUTILS();
 
     /**
      * 记录当前的forBody是否有直接跳转
@@ -46,35 +59,7 @@ public class Generator {
      */
     Stack<Boolean> elseJump;
 
-    /**
-     * 记录SymbolTable的子Table的编号,因为Block可以嵌套,所以需要用栈记录
-     */
-    private Stack<Integer> childTableIndex;
-
-    /**
-     * 记录是否需要回填continue和break语句
-     */
-    private Stack<Integer> needContinues;
-    private Stack<Integer> needBreaks;
-
-    /**
-     * 记录需要回填的continue和break语句的Instruction
-     */
-    private Stack<Instruction> continueInstructions;
-    private Stack<Instruction> breakInstructions;
-
-    private static final List<SymbolTable> SYMBOL_TABLES = SymbolTableBuilder.getSymbolTableBuilder().getSymbolTables();
-
-    private SymbolTable curSymbolTable;
-
-    private int tmpRegisterNum;
-
     private StringJoiner ret;
-
-    /**
-     * 标记是否正在定义初始化
-     */
-    private String defName;
 
     private static final Generator GENERATOR = new Generator();
 
@@ -87,372 +72,48 @@ public class Generator {
     }
 
     /**
-     * 这个Map存储标识符对应的的常数值,可能有全局常/变量对应的数值,int类型函数对应地返回值
-     * 不存储局部变量的值,这样不会有重名的key
+     * 为return,continue,break语句打上跳转标记
      */
-    private final HashMap<Symbol, Integer> symbolIntegerHashMap = new HashMap<>();
-    private List<LocalValTable> localValTables;
-
-    private LocalValTable curLocalValTable;
-
-    /**
-     * 获取函数参数的类型
-     */
-    private String getParamType(FuncFParamNode funcFParamNode) {
-        int dim = funcFParamNode.getLeftBracketTokens().size();
-        String paramType;
-        if (dim == 0) {
-            paramType = I32;
+    public void setJumpFlag(boolean ifFlag, boolean elseFlag, boolean forFlag) {
+        if (ifFlag) {
+            ifJump.pop();
+            ifJump.push(true);
         }
-        else if (dim == 1) {
-            paramType = I32POINT;
+        if (elseFlag) {
+            elseJump.pop();
+            elseJump.push(true);
         }
-        else {
-            // 计算第二维的维度
-            int lastDim = constAddExpHandler(funcFParamNode.getConstExpNode().getAddExpNode());
-            paramType = "[" + lastDim + " x i32]*";
+        if (forFlag) {
+            forJump.pop();
+            forJump.push(true);
         }
-        return paramType;
     }
 
-    /**
-     *
-     * 获取当前Block所属的SymbolTable在当前SymbolTable中子符号表的编号
-     */
-    public int getChildTableIndex() {
-        // 从栈顶取出
-        Integer ret = childTableIndex.pop();
-        // 下一次取出就是下一个子符号表的编号
-        childTableIndex.push(ret + 1);
-        return ret;
-    }
-
-    public Symbol findSymbol(String name) {
-        // 正在定义或尚未定义的变量的llvmName是null
-        // 已经定义好的变量的llvmName不为null
-        SymbolTable tmp = curSymbolTable;
-        Symbol ret = null;
-        while (tmp != null) {
-            if ((ret = tmp.getSymbol(name)) != null) {
-                // 满足以下条件之一,此符号有效可返回:
-                // 1.llvmName不为null,说明已经定义完成
-                // 2.llvmName为null,但是现在正将要写入llvmName的定义变量
-                if (ret.getLlvmName() != null || Objects.equals(defName, name)) {
-                    break;
-                }
-            }
-            tmp = tmp.getParent();
-        }
-        return ret;
-    }
-
-    public String getLocalValType(String name) {
-        return curLocalValTable.getLocalValType(name);
-    }
 
     /**
      * 初始化
      */
     public void init() {
-        this.curSymbolTable = SYMBOL_TABLES.get(0);
-        this.tmpRegisterNum = 0;
         this.ret = new StringJoiner("\n");
-        this.localValTables = new ArrayList<>();
-        this.curLocalValTable = null;
         this.condTypes = new Stack<>();
-        this.continueInstructions = new Stack<>();
-        this.breakInstructions = new Stack<>();
-        this.needContinues = new Stack<>();
-        this.needBreaks = new Stack<>();
-        // 初始化符号表序号
-        this.childTableIndex = new Stack<>();
-        this.childTableIndex.push(0);
-        this.defName = null;
         // 初始化Jump标记
         forJump = new Stack<>();
         ifJump = new Stack<>();
         elseJump = new Stack<>();
+        // 初始化工具类
+        UTILS.init();
+        BACK_FILL.init();
     }
 
 
-    public int calVal(TokenType opType, int val1, int val2) {
-        return switch (opType) {
-            case PLUS -> val1 + val2;
-            case MINU -> val1 - val2;
-            case MULT -> val1 * val2;
-            case DIV -> val1 / val2;
-            case MOD -> val1 % val2;
-            default -> 0;
-        };
-    }
-
-    /**
-     * 进行非运算
-     */
-    public Instruction not(String name) {
-        Instruction instruction = new Instruction(null, new StringJoiner("\n"));
-        String localValType = getLocalValType(name);
-        // 如果是一个常数,非零返回1;否则返回1
-        int constInt;
-        try {
-            constInt = Integer.parseInt(name);
-            if (constInt != 0) {
-                instruction.setLlvmName("0");
-            }
-            else {
-                instruction.setLlvmName("1");
-            }
-            return instruction;
-        }
-        catch (Exception e) {
-            constInt = 0;
-        }
-        if (Objects.equals(localValType, I32)) {
-            // 不是条件表达式结果而是一个整数值
-            // %12 = load i32, i32* %2, align 4
-            //  %13 = icmp ne i32 %12, 0
-            //  %14 = xor i1 %13, true
-            // 传来的变量已经load了,直接用; 不为零则为真
-            AllocElement icmpAlloc = icmp(TokenType.NEQ, name, "0");
-            instruction.addInstruction(icmpAlloc.getInstruction());
-            // 申请临时变量,无需加入申请指令
-            AllocElement allocAlloc = alloc(I1);
-            String tmp = allocAlloc.getLlvmName();
-            // 进行取反
-            StringJoiner stringJoiner = new StringJoiner(" ");
-            stringJoiner.add(TAB + tmp).add("=").add("xor").add(I1).add(icmpAlloc.getLlvmName() + ",").add("true");
-            // 加入取反指令
-            instruction.addInstruction(stringJoiner.toString());
-            // 设置返回值
-            instruction.setLlvmName(tmp);
-        }
-        // 是条件表达式结果
-        else if (Objects.equals(localValType, I1)){
-            // 直接取反
-            StringJoiner stringJoiner = new StringJoiner(" ");
-            // 申请临时变量
-            AllocElement allocAlloc = alloc(I1);
-            String tmp = allocAlloc.getLlvmName();
-            instruction.addInstruction(allocAlloc.getInstruction());
-            stringJoiner.add(tmp).add("=").add("xor").add(I1).add(name + ",").add("true");
-            instruction.addInstruction(stringJoiner.toString());
-            // 设置返回值
-            instruction.setLlvmName(tmp);
-        }
-        return instruction;
-    }
-
-    /**
-     * 为局部变量申请空间的语句
-     * @return 申请出的局部空间的名字
-     */
-    public AllocElement alloc(String type) {
-        tmpRegisterNum++;
-        String llvmName = "%" + tmpRegisterNum;
-        // 记录局部变量
-        curLocalValTable.addLocalVal(llvmName, type);
-        String instruction = TAB + llvmName + " = alloca " + type;
-        return new AllocElement(llvmName, instruction);
-    }
-
-    /**
-     * 申请一个序号给Label
-     * @return Label名字
-     */
-    public String allocLabel() {
-        tmpRegisterNum++;
-        String labelName = "%" + tmpRegisterNum;
-        curLocalValTable.addLocalVal(labelName, "label");
-        return labelName;
-    }
-
-
-    public Instruction addLabel(String label) {
-        // 标签值没有'%'
-        StringJoiner stringJoiner = new StringJoiner("\n");
-        // 先换一行
-        stringJoiner.add("").add(label.substring(1) + ":");
-        return new Instruction(null, stringJoiner);
-    }
-
-    /**
-     * load变量
-     */
-    public AllocElement load(String dType, String source) {
-        // %7 = load i32, i32* %6
-        AllocElement alloc = alloc(dType);
-        // 记录局部变量
-        curLocalValTable.addLocalVal(alloc.getLlvmName(), dType);
-        // 存了申请语句,但不用就行了
-        String tmp = alloc.getLlvmName();
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add(tmp).add("=").add("load").add(dType + ",").add(dType+"*").add(source);
-        String instruction = stringJoiner.toString();
-        return new AllocElement(tmp, instruction);
-    }
-
-    /**
-     * store变量值
-     * @return store指令
-     */
-    public String store(String sType, String sName, String dType, String dName) {
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add("store").add(sType).add(sName + ",").add(dType).add(dName);
-        return stringJoiner.toString();
-    }
-
-    /**
-     * 改变控制流
-     */
-    public Instruction unconditionalJump(String dest) {
-        // br label <dest>
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add(BR).add(LABEL).add(dest);
-        return new Instruction(null, stringJoiner);
-    }
-
-    public Instruction conditionalJump(String cond, String ifTrue, String ifFalse) {
-        // br i1 <cond>, label <if-true>, label <if-false>
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add(BR).add(I1).add(cond+COMMA).add(LABEL).add(ifTrue+COMMA).add(LABEL).add(ifFalse);
-        return new Instruction(null, stringJoiner);
-    }
-
-    /**
-     * 进行条件运算
-     * @param op opToken的类型
-     * @return 条件运算的结果
-     */
-    public AllocElement icmp(TokenType op, String val1, String val2) {
-        String condOp = switch (op) {
-            case GEQ -> "sge";
-            case GRE -> "sgt";
-            case LEQ -> "sle";
-            case LSS -> "slt";
-            case EQL -> "eq";
-            case NEQ -> "ne";
-            default -> null;
-        };
-        if (condOp == null) {
-            System.out.println("未知错误");
-        }
-        // 例子: %9 = icmp slt i32 %8, 2
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        String tmp = "%" + (++tmpRegisterNum);
-        // 记录局部变量
-        curLocalValTable.addLocalVal(tmp, I1);
-        stringJoiner.add(tmp).add("=").add("icmp").add(condOp).add(I32).add(val1 + ",").add(val2);
-        String instruction = stringJoiner.toString();
-        return new AllocElement(tmp, instruction);
-    }
-
-
-    public AllocElement zext(String originVal) {
-        // %7 = zext i1 %6 to i32
-        String tmp = "%" + (++tmpRegisterNum);
-        // 记录局部变量
-        curLocalValTable.addLocalVal(tmp, I32);
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add(tmp).add("=").add("zext").add(I1).add(originVal).add("to").add(I32);
-        String instruction = stringJoiner.toString();
-        return new AllocElement(tmp, instruction);
-    }
-
-    public AllocElement calPrint(String type, String lName, String rName, TokenType opType) {
-        // 查看两操作数是否常量,如果是,直接算出并返回,不用申请空间
-        try {
-            int val1 = Integer.parseInt(lName);
-            int val2 = Integer.parseInt(rName);
-            String tmp = String.valueOf(calVal(opType, val1, val2));
-            return new AllocElement(tmp, null);
-        }
-        catch (Exception ignored) {
-        }
-        // 中间变量
-        AllocElement alloc = alloc(I32);
-        String tmp = alloc.getLlvmName();
-        StringJoiner stringJoiner = new StringJoiner(" ", TAB, "");
-        stringJoiner.add(tmp).add("=");
-        String instruction = switch (opType) {
-            case PLUS -> stringJoiner.add("add").add(type).add(lName + ",").add(rName).toString();
-            case MINU -> stringJoiner.add("sub").add(type).add(lName + ",").add(rName).toString();
-            case MULT -> stringJoiner.add("mul").add(type).add(lName + ",").add(rName).toString();
-            case DIV -> stringJoiner.add("sdiv").add(type).add(lName + ",").add(rName).toString();
-            case MOD -> stringJoiner.add("srem").add(type).add(lName + ",").add(rName).toString();
-            default -> "";
-        };
-        return new AllocElement(tmp, instruction);
-    }
-
-    /**
-     * 函数调用
-     */
-    public AllocElement callFunc(String funcName, List<String> args) {
-        // %7 = call i32 @aaa(i32 %5, i32 %6)
-        // call void @putint(i32 %7)
-        FuncSymbol funcSymbol = (FuncSymbol) findSymbol(funcName);
-        List<FuncParamSymbol> funcParamSymbols = funcSymbol.getFuncParamSymbols();
-        // 遍历参数列表,插入参数
-        StringJoiner instruction = new StringJoiner(" ", TAB, "");
-        StringJoiner argsJoiner = new StringJoiner(", ", "(", ")");
-        if (args != null) {
-            for(int i=0; i<args.size(); i++) {
-                argsJoiner.add(funcParamSymbols.get(i).getLlvmType() + " " + args.get(i));
-            }
-        }
-        // 记录返回值
-        String tmp = null;
-        switch (funcSymbol.getReturnType()) {
-            case INT -> {
-                tmp = "%" + (++tmpRegisterNum);
-                // 记录局部变量
-                curLocalValTable.addLocalVal(tmp, I32);
-                instruction.add(tmp).add("=").add("call").add(I32).add(funcSymbol.getLlvmName() + argsJoiner);
-            }
-            case VOID -> instruction.add("call").add("void").add(funcSymbol.getLlvmName() + argsJoiner);
-            default -> System.out.println("unexpected func returnType");
-        }
-        return new AllocElement(tmp, instruction.toString());
-    }
-
-    // 添加库函数定义
-    public void addLibFunc() {
-        FuncSymbol getint = new FuncSymbol("getint", new ArrayList<>(), FuncSymbol.ReturnType.INT, 0);
-        getint.setLlvmName("@" + "getint");
-
-        List<FuncParamSymbol> putintParams = new ArrayList<>() {{
-            FuncParamSymbol putintParam = new FuncParamSymbol("a", 0);
-            putintParam.setLlvmType(I32);
-            add(putintParam);
-        }};
-        FuncSymbol putint = new FuncSymbol("putint", putintParams, FuncSymbol.ReturnType.VOID, 0);
-        putint.setLlvmName("@" + "putint");
-
-        List<FuncParamSymbol> putchParams = new ArrayList<>() {{
-            FuncParamSymbol putchParam = new FuncParamSymbol("a", 0);
-            putchParam.setLlvmType(I32);
-            add(putchParam);
-        }};
-        FuncSymbol putch = new FuncSymbol("putch", putchParams, FuncSymbol.ReturnType.VOID, 0);
-        putch.setLlvmName("@" + "putch");
-
-        // 加入全局符号表
-        curSymbolTable.addSymbol(getint);
-        curSymbolTable.addSymbol(putint);
-        curSymbolTable.addSymbol(putch);
-        // 加入库函数定义
-        // declare i32 @getint()
-        // declare void @putint(i32)
-        // declare void @putch(i32)
-        ret.add("declare i32 @getint()");
-        ret.add("declare void @putint(i32)");
-        ret.add("declare void @putch(i32)");
-    }
 
     /**
      * 初始化全局数组
-     * @param size 初始值数量,即此维度的长度
+     * @param constInitValNode 用于初始化的常量初始值
+     * @param initValNode 用于初始化的变量初始值
      * @param stringJoiner 指令拼装者
+     * @param isConst 是否常量
+     * @param innerDim 二维数组的第二位维数表示,若是一维数组则为null
      */
     public boolean initGlobalArr(ConstInitValNode constInitValNode, InitValNode initValNode, StringJoiner stringJoiner, boolean isConst, String innerDim) {
         boolean allZeroFlag = true;
@@ -463,7 +124,7 @@ public class Generator {
             List<ConstInitValNode> constInitValNodes = constInitValNode.getConstInitValNodes();
             size = constInitValNodes.size();
             for (ConstInitValNode ele : constInitValNodes) {
-                initVal = constAddExpHandler(ele.getConstExpNode().getAddExpNode());
+                initVal = UTILS.constAddExpHandler(ele.getConstExpNode().getAddExpNode());
                 if (initVal != 0) {
                     allZeroFlag = false;
                 }
@@ -474,7 +135,7 @@ public class Generator {
             List<InitValNode> initValNodes = initValNode.getInitValNodes();
             size = initValNodes.size();
             for (InitValNode ele : initValNodes) {
-                initVal = constAddExpHandler(ele.getExpNode().getAddExpNode());
+                initVal = UTILS.constAddExpHandler(ele.getExpNode().getAddExpNode());
                 if (initVal != 0) {
                     allZeroFlag = false;
                 }
@@ -511,8 +172,12 @@ public class Generator {
 
     // 获取语法分析时生成的AST,遍历各个成分进行分析
     public void generate() {
-        // 加入库函数
-        addLibFunc();
+        // 加入库函数定义
+        // declare i32 @getint() ; declare void @putint(i32) ; declare void @putch(i32)
+        ret.add("declare i32 @getint()");
+        ret.add("declare void @putint(i32)");
+        ret.add("declare void @putch(i32)");
+
         CompUnitNode compUnitNode = Parser.getPARSER().getCompUnitNode();
         List<DeclNode> declNodes = compUnitNode.getDeclNodes();
         for (DeclNode declNode : declNodes) {
@@ -539,7 +204,7 @@ public class Generator {
         String llvmType;
         for (int i=0; i<dimension; i++) {
             ConstExpNode constExpNode = constExpNodes.get(i);
-            dim[i] = String.valueOf(constAddExpHandler(constExpNode.getAddExpNode()));
+            dim[i] = String.valueOf(UTILS.constAddExpHandler(constExpNode.getAddExpNode()));
         }
         // 记录维度
         // 内层维度,一维即本身,二维是第二维的维度
@@ -589,14 +254,14 @@ public class Generator {
         // 是否属于参数类型数组
         boolean isParamArr = arrType.contains("*");
         if (isParamArr) {
-            AllocElement load = load(arrType, arrName);
+            AllocElement load = UTILS.load(arrType, arrName);
             instruction.addInstruction(load.getInstruction());
             // 用加载好的arrName替换
             arrName = load.getLlvmName();
             // 加载后去除*
             arrType = arrType.replace("*", "");
         }
-        String tmp = alloc(getType).getLlvmName();
+        String tmp = UTILS.alloc(getType).getLlvmName();
         StringJoiner stringJoiner = new StringJoiner(", ");
         stringJoiner.add(TAB + tmp + " = getelementptr " + arrType);
         stringJoiner.add(arrType + "* " + arrName);
@@ -684,6 +349,7 @@ public class Generator {
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
         int constValue = 0;
         String llvmType;
+        String llvmName;
         String name;
         int size;
         // 全局变量
@@ -693,11 +359,12 @@ public class Generator {
             for (VarDefNode varDefNode : varDefNodes) {
                 // 遍历变量定义
                 name = varDefNode.getIdentToken().getValue();
+                llvmName = "@" + name;
                 size = varDefNode.getConstExpNodes().size();
                 InitValNode initValNode = varDefNode.getInitValNode();
                 // 用于拼接指令
                 StringJoiner stringJoiner = new StringJoiner(" ", "", "");
-                stringJoiner.add("@" + name).add("=").add("dso_local").add("global");
+                stringJoiner.add(llvmName).add("=").add("dso_local").add("global");
                 // 非数组
                 if (size == 0) {
                     // 查看是否有初值, 没有初始值的默认为0
@@ -705,7 +372,7 @@ public class Generator {
                     llvmType = I32;
                     if (initValNode != null) {
                         AddExpNode addExpNode = varDefNode.getInitValNode().getExpNode().getAddExpNode();
-                        constValue = constAddExpHandler(addExpNode);
+                        constValue = UTILS.constAddExpHandler(addExpNode);
                     }
                     // 记录初值
                     stringJoiner.add(I32).add(String.valueOf(constValue));
@@ -714,14 +381,8 @@ public class Generator {
                 else {
                     llvmType = arrHandler(stringJoiner, varDefNode.getConstExpNodes(), size, initValNode, null, false);
                 }
-                // 定义完毕,设置定义变量llvmName
-                defName = name;
-                // 此时才记录进符号表
-                Symbol symbol = findSymbol(name);
-                defName = null;
-                symbol.setLlvmName("@" + name);
-                symbol.setLlvmType(llvmType);
-                symbolIntegerHashMap.put(symbol, constValue);
+                // 定义完毕,记录符号表
+                UTILS.setSymbolLLVMInfo(name, llvmType, llvmName, constValue, name);
                 // 记录指令
                 instruction.addInstruction(stringJoiner.toString());
             }
@@ -733,14 +394,15 @@ public class Generator {
             for (ConstDefNode constDefNode : constDeclNode.getConstDefNodes()) {
                 // 遍历常量定义
                 name = constDefNode.getIdentToken().getValue();
+                llvmName = "@" + name;
                 size = constDefNode.getConstExpNodes().size();
                 ConstInitValNode constInitValNode = constDefNode.getConstInitValNode();
                 // 用于拼接指令
                 StringJoiner stringJoiner = new StringJoiner(" ", "", "");
-                stringJoiner.add("@" + name).add("=").add("dso_local").add("constant");
+                stringJoiner.add(llvmName).add("=").add("dso_local").add("constant");
                 // 非数组
                 if (size == 0) {
-                    constValue = constAddExpHandler(constInitValNode.getConstExpNode().getAddExpNode());
+                    constValue = UTILS.constAddExpHandler(constInitValNode.getConstExpNode().getAddExpNode());
                     llvmType = I32;
                     // 记录初值
                     stringJoiner.add(I32).add(String.valueOf(constValue));
@@ -749,14 +411,8 @@ public class Generator {
                 else {
                     llvmType = arrHandler(stringJoiner, constDefNode.getConstExpNodes(), size, null, constInitValNode, true);
                 }
-                // 定义完毕,设置定义变量llvmName
-                defName = name;
-                // 此时才记录进符号表
-                Symbol symbol = findSymbol(name);
-                defName = null;
-                symbol.setLlvmName("@" + name);
-                symbol.setLlvmType(llvmType);
-                symbolIntegerHashMap.put(symbol, constValue);
+                // 定义完毕,记录符号表
+                UTILS.setSymbolLLVMInfo(name, llvmType, llvmName, constValue, name);
                 // 记录指令
                 instruction.addInstruction(stringJoiner.toString());
             }
@@ -764,86 +420,6 @@ public class Generator {
         return instruction;
     }
 
-    /**
-     * 返回计算得到的常量数值
-     */
-    public int constAddExpHandler(AddExpNode addExpNode) {
-        // AddExp → MulExp | AddExp ('+' | '−') MulExp
-        int val1 = 0;
-        boolean needCal = false;
-        if (addExpNode.getAddExpNode() != null) {
-            val1 = constAddExpHandler(addExpNode.getAddExpNode());
-            needCal = true;
-        }
-        int val2 = constMulExpHandler(addExpNode.getMulExpNode());
-        if (needCal) {
-            return calVal(addExpNode.getOpToken().getType(), val1, val2);
-        }
-        else {
-            return val2;
-        }
-    }
-
-    public int constMulExpHandler(MulExpNode mulExpNode) {
-        // MulExp → UnaryExp | MulExp ('*' | '/' | '%') UnaryExp
-        int val1 = 0;
-        boolean needCal = false;
-        if (mulExpNode.getMulExpNode() != null) {
-            val1 = constMulExpHandler(mulExpNode.getMulExpNode());
-            needCal = true;
-        }
-        int val2 = constUnaryExpHandler(mulExpNode.getUnaryExpNode());
-        if (needCal) {
-            return calVal(mulExpNode.getOpToken().getType(), val1, val2);
-        }
-        else {
-            return val2;
-        }
-    }
-
-    public int constUnaryExpHandler(UnaryExpNode unaryExpNode) {
-        // UnaryExp → PrimaryExp | UnaryOp UnaryExp | Ident '(' [FuncRParams] ')'
-        // 注意,常量表达式中的UnaryOp不会出现 '!'
-        if (unaryExpNode.getUnaryOpNode() != null) {
-            int val = constUnaryExpHandler(unaryExpNode.getUnaryExpNode());
-            val = calVal(unaryExpNode.getUnaryOpNode().getOpToken().getType(), 0, val);
-            return val;
-        }
-        else if (unaryExpNode.getPrimaryExpNode() != null) {
-            return constPrimaryExpHandler(unaryExpNode.getPrimaryExpNode());
-        }
-        else {
-            // 函数调用, 全局变量中不会出现函数调用
-            return 0;
-        }
-    }
-
-    /**
-     * 常数表达式constPrimaryExp
-     */
-    public int constPrimaryExpHandler(PrimaryExpNode primaryExpNode) {
-        // PrimaryExp → '(' Exp ')' | Number | LVal
-        if (primaryExpNode.getExpNode() != null) {
-            return constAddExpHandler(primaryExpNode.getExpNode().getAddExpNode());
-        }
-        else if (primaryExpNode.getNumberNode() != null) {
-            // 常数
-            return Integer.parseInt(primaryExpNode.getNumberNode().getIntConstToken().getValue());
-        }
-        else {
-            // LVal 标识符
-            LValNode lValNode = primaryExpNode.getlValNode();
-            if (lValNode.getExpNodes().size() == 0) {
-                // 不是数组, 查表找到其对应值
-                Symbol symbol = findSymbol(lValNode.getIdentToken().getValue());
-                return symbolIntegerHashMap.get(symbol);
-            }
-            else {
-                // 是数组, 算其对应值
-                return 0;
-            }
-        }
-    }
 
     public Instruction funcDefHandler(FuncDefNode funcDefNode) {
         //  FuncDef → FuncType Ident '(' [FuncFParams] ')' Block
@@ -862,18 +438,13 @@ public class Generator {
         }
         // 函数名
         String funcName = funcDefNode.getIdentToken().getValue();
-        defName = funcName;
-        FuncSymbol funcSymbol = (FuncSymbol) findSymbol(funcName);
-        defName = null;
+        FuncSymbol funcSymbol = (FuncSymbol) UTILS.findSymbol(funcName, funcName);
         List<FuncParamSymbol> funcParamSymbols = funcSymbol.getFuncParamSymbols();
 
         // 进入参数分析tmpRegisterNum需要重置,每次申请寄存器先++,从0开始,所以初始值置为-1
-        tmpRegisterNum = -1;
-        curLocalValTable = new LocalValTable();
-        localValTables.add(curLocalValTable);
+        UTILS.enterNewLocalArea();
         // 进入参数表后,SymbolTable层数加1
-        curSymbolTable = curSymbolTable.getChilds().get(getChildTableIndex());
-        childTableIndex.push(0);
+        UTILS.enterNextSymbolTable();
 
         // 函数参数
         FuncFParamsNode funcFParamsNode = funcDefNode.getFuncFParamsNode();
@@ -888,20 +459,18 @@ public class Generator {
             List<String> paramNames = new ArrayList<>();
             for (int i=0; i<funcFParamNodes.size(); i++) {
                 FuncFParamNode funcFParamNode = funcFParamNodes.get(i);
-                String paramType = getParamType(funcFParamNode);
-                // 申请寄存器
-                tmpRegisterNum++;
-                String llvmName = "%" + tmpRegisterNum;
+                String paramType = UTILS.getParamType(funcFParamNode);
+                // 申请寄存器,在申请时已经存入局部变量表
+                AllocElement alloc = UTILS.alloc(paramType);
+                String llvmName = alloc.getLlvmName();
                 paramNames.add(llvmName);
-                // 记录局部变量
-                curLocalValTable.addLocalVal(llvmName, paramType);
                 funcFParams.add(paramType + " " + llvmName);
-                // 此处不用记录参数,因为参数的值存储的寄存器还要在之后申请
+                // 此处不用记录参数寄存器编号(llvmName),因为参数的值存储的寄存器还要在之后申请
                 // 但是需要记录函数参数符号定义的类型,以便后续使用
                 funcParamSymbols.get(i).setLlvmType(paramType);
             }
             // 函数本身占一个寄存器编号
-            tmpRegisterNum++;
+            UTILS.addRegisterNum();
             funcDef.add("@" + funcName + funcFParams);
             funcDef.add(LBRACE);
             instruction.addInstruction(funcDef.toString());
@@ -911,26 +480,24 @@ public class Generator {
                 String sName = paramNames.get(i);
                 //  %4 = alloca [3 x i32]*
                 // store [3 x i32]* %2, [3 x i32]* * %4
-                String paramType = getParamType(funcFParamNode);
+                String paramType = UTILS.getParamType(funcFParamNode);
                 // 申请寄存器
-                AllocElement allocAlloc = alloc(paramType);
+                AllocElement allocAlloc = UTILS.alloc(paramType);
                 String dName = allocAlloc.getLlvmName();
                 instruction.addInstruction(allocAlloc.getInstruction());
-                String storeAlloc = store(paramType, sName, paramType + "*", dName);
+                String storeAlloc = UTILS.store(paramType, sName, paramType + "*", dName);
                 instruction.addInstruction(storeAlloc);
                 // 记录到符号表中
                 String funcFParamName = funcFParamNode.getIdentToken().getValue();
-                defName = funcFParamName;
                 // 标记参数load后临时变量的名字
-                findSymbol(funcFParamName).setLlvmName(dName);
-                defName = null;
+                UTILS.findSymbol(funcFParamName, funcFParamName).setLlvmName(dName);
                 // 记录到局部变量表中
-                curLocalValTable.addLocalVal(dName, paramType);
+                UTILS.addLocalVal(dName, paramType);
             }
         }
         // 无参数,寄存器直接++
         else {
-            tmpRegisterNum++;
+            UTILS.addRegisterNum();
             funcDef.add("@" + funcName + funcFParams);
             funcDef.add(LBRACE);
             instruction.addInstruction(funcDef.toString());
@@ -965,8 +532,7 @@ public class Generator {
         }
         instruction.addInstruction(RBRACE);
         // 结束函数分析,SymbolTable回退,出栈当前符号表的孩子符号
-        curSymbolTable = curSymbolTable.getParent();
-        childTableIndex.pop();
+        UTILS.exitCurSymbolTable();
         return instruction;
     }
 
@@ -976,12 +542,10 @@ public class Generator {
         ret.add(mainFuncHeader + LBRACE);
         List<BlockItemNode> blockItemNodes = mainFuncDefNode.getBlockNode().getBlockItemNodes();
         // 重置临时变量数字, main函数先占一个0,临时局部变量从1开始
-        tmpRegisterNum = 0;
-        curLocalValTable = new LocalValTable();
-        localValTables.add(curLocalValTable);
+        UTILS.enterNewLocalArea();
+        UTILS.addRegisterNum();
         // 进入block层数++,main函数的SymbolTable是全局函数表中的子符号表的最后一个
-        curSymbolTable = curSymbolTable.getChilds().get(getChildTableIndex());
-        childTableIndex.push(0);
+        UTILS.enterNextSymbolTable();
         Instruction blockItemInstruction;
         for (BlockItemNode blockItemNode : blockItemNodes) {
             // 主函数分析里得到的blockItem返回的指令集直接加入结果就好,没有回填的说法
@@ -991,8 +555,7 @@ public class Generator {
             ret.add(blockItemInstruction.toString());
         }
         // 退出block层数--,回退到全局符号表
-        curSymbolTable = curSymbolTable.getParent();
-        childTableIndex.pop();
+        UTILS.exitCurSymbolTable();
         ret.add(RBRACE);
     }
 
@@ -1016,7 +579,7 @@ public class Generator {
         instruction.addInstruction(elementPtr.toString());
         String dName = elementPtr.getLlvmName();
         // 将初始值存入
-        String store = store(I32, sName, I32POINT, dName);
+        String store = UTILS.store(I32, sName, I32POINT, dName);
         instruction.addInstruction(store);
     }
 
@@ -1045,7 +608,7 @@ public class Generator {
         dimInt[1] = Integer.parseInt(dimStr[1]);
 
         // 申请局部变量
-        AllocElement alloc = alloc(llvmType);
+        AllocElement alloc = UTILS.alloc(llvmType);
         String llvmName = alloc.getLlvmName();
         instruction.addInstruction(alloc.getInstruction());
 
@@ -1078,7 +641,7 @@ public class Generator {
                     if (size == 0) {
                         // 申请空间,记录alloc指令
                         llvmType = I32;
-                        AllocElement alloc = alloc(llvmType);
+                        AllocElement alloc = UTILS.alloc(llvmType);
                         instruction.addInstruction(alloc.getInstruction());
                         llvmName = alloc.getLlvmName();
 
@@ -1089,7 +652,7 @@ public class Generator {
                             instruction.addInstruction(addExpInstruction.toString());
                             String sName = addExpInstruction.getLlvmName();
                             // 记录store指令 store i32 %0, i32 * %4
-                            instruction.addInstruction(store(I32, sName, I32POINT, llvmName));
+                            instruction.addInstruction(UTILS.store(I32, sName, I32POINT, llvmName));
                         }
                     }
                     // 数组
@@ -1119,13 +682,8 @@ public class Generator {
                         }
 
                     }
-                    // 标记defName
-                    defName = name;
-                    // 这时候才记录llvmName
-                    Symbol symbol = findSymbol(name);
-                    defName = null;
-                    symbol.setLlvmName(llvmName);
-                    symbol.setLlvmType(llvmType);
+                    // 记录符号表
+                    UTILS.setSymbolLLVMInfo(name, llvmType, llvmName, 0, name);
                 }
             }
             // 局部常量
@@ -1144,7 +702,7 @@ public class Generator {
                     if (size == 0) {
                         // 申请空间
                         llvmType = I32;
-                        AllocElement alloc = alloc(llvmType);
+                        AllocElement alloc = UTILS.alloc(llvmType);
                         instruction.addInstruction(alloc.getInstruction());
                         llvmName = alloc.getLlvmName();
 
@@ -1154,7 +712,7 @@ public class Generator {
                         String sName = addExpInstruction.getLlvmName();
 
                         // 记录store指令
-                        instruction.addInstruction(store(I32, sName, I32POINT, llvmName));
+                        instruction.addInstruction(UTILS.store(I32, sName, I32POINT, llvmName));
                     }
                     // 数组
                     else {
@@ -1181,12 +739,8 @@ public class Generator {
                             }
                         }
                     }
-                    // 标记defName
-                    defName = name;
-                    Symbol symbol = findSymbol(name);
-                    defName = null;
-                    symbol.setLlvmName(llvmName);
-                    symbol.setLlvmType(llvmType);
+                    // 记录符号表
+                    UTILS.setSymbolLLVMInfo(name, llvmType, llvmName, 0, name);
                 }
             }
         }
@@ -1225,7 +779,7 @@ public class Generator {
         instruction.addInstruction(elementPtr.toString());
         String dName = elementPtr.getLlvmName();
         // 存入值
-        String store = store(I32, sName, I32POINT, dName);
+        String store = UTILS.store(I32, sName, I32POINT, dName);
         instruction.addInstruction(store);
         instruction.setLlvmName(dName);
     }
@@ -1234,7 +788,6 @@ public class Generator {
     public Instruction stmtHandler(StmtNode stmtNode, boolean ifFlag, boolean elseFlag, boolean forFlag) {
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
         Instruction addExpInstruction;
-        Integer popNum;
         String nextLabel;
         switch (stmtNode.getStmtType()) {
             case EXP:
@@ -1245,8 +798,7 @@ public class Generator {
                 break;
             case BLOCK:
                 // 进入Block层数++,并入栈初始化子符号表的孩子序号
-                curSymbolTable = curSymbolTable.getChilds().get(getChildTableIndex());
-                childTableIndex.push(0);
+                UTILS.enterNextSymbolTable();
                 List<BlockItemNode> blockItemNodes = stmtNode.getBlockNode().getBlockItemNodes();
                 Instruction blockInstruction = new Instruction(null, new StringJoiner("\n"));
                 List<Instruction> blockInstructions = new ArrayList<>();
@@ -1262,8 +814,7 @@ public class Generator {
                     }
                 }
                 // 退出Block层数--,出栈当前符号表的孩子序号
-                curSymbolTable = curSymbolTable.getParent();
-                childTableIndex.pop();
+                UTILS.exitCurSymbolTable();
                 blockInstruction.setNeedBackInstructions(blockInstructions);
                 // 标记为Block,以便递归回填
                 blockInstruction.setBlock(true);
@@ -1279,12 +830,12 @@ public class Generator {
                 // 通过标识符名称找到其在中间代码中的名称(全局变量为@*,局部变量为%*)
                 LValNode lValNode = stmtNode.getlValNode();
                 String name = lValNode.getIdentToken().getValue();
-                Symbol symbol = findSymbol(name);
+                Symbol symbol = UTILS.findSymbol(name, null);
                 String llvmName = symbol.getLlvmName();
                 int dimension = symbol.getDimension();
                 // 非数组
                 if (dimension == 0) {
-                    instruction.addInstruction(store(I32, sName, I32POINT, llvmName));
+                    instruction.addInstruction(UTILS.store(I32, sName, I32POINT, llvmName));
                 }
                 // 数组
                 else {
@@ -1308,7 +859,7 @@ public class Generator {
                         List<String> args = new ArrayList<>(){{
                            add(argVal);
                         }};
-                        instruction.addInstruction(callFunc("putint", args).getInstruction());
+                        instruction.addInstruction(UTILS.callFunc("putint", args).getInstruction());
                         i++;
                     }
                     else if (curChar == '\\') {
@@ -1318,7 +869,7 @@ public class Generator {
                         List<String> args = new ArrayList<>(){{
                             add(argVal);
                         }};
-                        instruction.addInstruction(callFunc("putch", args).getInstruction());
+                        instruction.addInstruction(UTILS.callFunc("putch", args).getInstruction());
                         i++;
                     }
                     else {
@@ -1327,48 +878,21 @@ public class Generator {
                         List<String> args = new ArrayList<>(){{
                             add(argVal);
                         }};
-                        instruction.addInstruction(callFunc("putch", args).getInstruction());
+                        instruction.addInstruction(UTILS.callFunc("putch", args).getInstruction());
                     }
                 }
                 break;
             case CONTINUE:
                 // 查看在哪种Block里,打上标记
-                if (ifFlag) {
-                    ifJump.pop();
-                    ifJump.push(true);
-                }
-                if (elseFlag) {
-                    elseJump.pop();
-                    elseJump.push(true);
-                }
-                if (forFlag) {
-                    forJump.pop();
-                    forJump.push(true);
-                }
+                setJumpFlag(ifFlag, elseFlag, forFlag);
                 // 需要回填,返回的是对象,可以之后回填,打上标记即可
-                continueInstructions.push(instruction);
-                popNum = needContinues.pop();
-                popNum += 1;
-                needContinues.push(popNum);
+                BACK_FILL.addNeedBackFillIC(instruction);
                 return instruction;
             case BREAK:
-                if (ifFlag) {
-                    ifJump.pop();
-                    ifJump.push(true);
-                }
-                if (elseFlag) {
-                    elseJump.pop();
-                    elseJump.push(true);
-                }
-                if (forFlag) {
-                    forJump.pop();
-                    forJump.push(true);
-                }
+                // 查看在哪种Block里,打上标记
+                setJumpFlag(ifFlag, elseFlag, forFlag);
                 // 需要回填,打上标记
-                breakInstructions.push(instruction);
-                popNum = needBreaks.pop();
-                popNum += 1;
-                needBreaks.push(popNum);
+                BACK_FILL.addNeedBackFillIB(instruction);
                 return instruction;
             case IF:
                 //  'if' '(' Cond ')' Stmt [ 'else' Stmt ]
@@ -1386,13 +910,13 @@ public class Generator {
 
                 // ifBody, 默认无直接跳转
                 ifJump.push(false);
-                String ifBodyLabel = allocLabel();
+                String ifBodyLabel = UTILS.allocLabel();
                 // 若是Block类型,可能需要回填
                 StmtNode forStmtNode = stmtNode.getStmtNodes().get(0);
                 Instruction ifBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(0), true, false, false);
                 // 若是Block类型,标记;此时ifBodyInstructions本身已经有标记
                 boolean ifBodyB = ifBodyInstructions.isBlock();
-                // 若不是Block类型, Continue和Break也要归类为Blcok类型
+                // 若不是Block类型, Continue和Break也要归类为Block类型
                 if (forStmtNode.getStmtType() == StmtNode.StmtType.BREAK || forStmtNode.getStmtType() == StmtNode.StmtType.CONTINUE) {
                     ifBodyB = true;
                 }
@@ -1404,7 +928,7 @@ public class Generator {
                 boolean elseBodyB = false;
                 if (stmtNode.getElesToken() != null) {
                     elseJump.push(false);
-                    elseBodyLabel= allocLabel();
+                    elseBodyLabel= UTILS.allocLabel();
                     elseBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(1), false, true, false);
                     // 若是Block类型,标记,之后聚合
                     if (elseBodyInstructions.isBlock()) {
@@ -1413,7 +937,7 @@ public class Generator {
                 }
 
                 // nextLabel, 加上Label即可,下一条语句stmt会按它自己的处理执行
-                nextLabel = allocLabel();
+                nextLabel = UTILS.allocLabel();
 
                 // 进行回填
                 // ifCond语句里的跳转语句回填,根据标记好的语句类型进行回填
@@ -1469,12 +993,12 @@ public class Generator {
                     instruction.addInstruction(ifCondInstruction.toString());
                     // 如果有下一个条件判断的基本块,那么加入指令
                     if (ifCondInstruction.getNextLabel() != null) {
-                        instruction.addInstruction(addLabel(ifCondInstruction.getNextLabel()).toString());
+                        instruction.addInstruction(UTILS.addLabel(ifCondInstruction.getNextLabel()).toString());
                     }
                 }
 
                 // ifBody
-                instruction.addInstruction(addLabel(ifBodyLabel).toString());
+                instruction.addInstruction(UTILS.addLabel(ifBodyLabel).toString());
                 // 如果是Block类型(ifBody和elseBody任何一个),需要留着回填
                 if (instruction.isBlock()) {
                     instruction.addNeedBackInstruction(ifBodyInstructions);
@@ -1487,11 +1011,11 @@ public class Generator {
                 if (elseBodyLabel != null) {
                     // 如果是Block类型,需要留着回填
                     if (instruction.isBlock()) {
-                        instruction.addNeedBackInstruction(addLabel(elseBodyLabel));
+                        instruction.addNeedBackInstruction(UTILS.addLabel(elseBodyLabel));
                         instruction.addNeedBackInstruction(elseBodyInstructions);
                     }
                     else {
-                        instruction.addInstruction(addLabel(elseBodyLabel).toString());
+                        instruction.addInstruction(UTILS.addLabel(elseBodyLabel).toString());
                         instruction.addInstruction(elseBodyInstructions.toString());
                     }
                 }
@@ -1500,10 +1024,10 @@ public class Generator {
                 // 注意,因为顺序是 ifCond -> ifBody -> {elseBody} -> nextLabel
                 // 所以如果ifBody和elseBody语句需要回填,那么nextLabel也应该回填
                 if (instruction.isBlock()) {
-                    instruction.addNeedBackInstruction(addLabel(nextLabel));
+                    instruction.addNeedBackInstruction(UTILS.addLabel(nextLabel));
                 }
                 else {
-                    instruction.addInstruction(addLabel(nextLabel).toString());
+                    instruction.addInstruction(UTILS.addLabel(nextLabel).toString());
                 }
 
                 // 分析完成,弹出条件类型
@@ -1517,9 +1041,7 @@ public class Generator {
                 // 记录条件类型,以便条件表达式处理子程序进行跳转
                 condTypes.push(CondType.FOR);
                 // 假设不用continue和break回填
-                needContinues.push(0);
-                needBreaks.push(0);
-                // 假设需要回填的数量为0
+                BACK_FILL.enterForInit();
 
                 // ForStmtOne,初始化语句
                 if (stmtNode.getForStmtOne() != null) {
@@ -1530,12 +1052,12 @@ public class Generator {
                 List<Instruction> forCondInstructions = null;
                 String forCondLabel = null;
                 if (stmtNode.getCondNode() != null) {
-                    forCondLabel = allocLabel();
+                    forCondLabel = UTILS.allocLabel();
                     forCondInstructions = lOrExpHandler(stmtNode.getCondNode().getlOrExpNode());
                 }
 
                 // forBody, 循环体语句
-                String forBodyLabel = allocLabel();
+                String forBodyLabel = UTILS.allocLabel();
                 StmtNode forBodyStmt = stmtNode.getStmtNode();
                 Instruction forBodyInstruction;
                 forJump.push(false);
@@ -1560,28 +1082,20 @@ public class Generator {
                 Instruction forStepInstruction = null;
                 String forStepLabel = null;
                 if (stmtNode.getForStmtTwo() != null) {
-                    forStepLabel = allocLabel();
+                    forStepLabel = UTILS.allocLabel();
                     forStepInstruction = forStmtHandler(stmtNode.getForStmtTwo());
                 }
 
                 // nextLabel
-                nextLabel = allocLabel();
+                nextLabel = UTILS.allocLabel();
 
                 // 进行回填操作
                 // forCond如果有的话, 对每一个跳转语句进行回填
                 if (forCondLabel != null) {
                     // 遍历forCondInstruction的所有跳转语句,进行回填
                     for (Instruction forCondInstruction : forCondInstructions) {
-                       // 根据eqExp的类型,进行跳转语句的回填
-                        String nextLAndLabel = forCondInstruction.getNextLAndLabel();
-                        String nextLOrLabel = forCondInstruction.getNextLOrLabel();
-                        String cond = forCondInstruction.getLlvmName();
-                        switch (forCondInstruction.getConditionJumpType()) {
-                            case FAN -> forCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, nextLabel).toString());
-                            case FAO -> forCondInstruction.addInstruction(conditionalJump(cond, nextLAndLabel, nextLOrLabel).toString());
-                            case FBN -> forCondInstruction.addInstruction(conditionalJump(cond, forBodyLabel, nextLabel).toString());
-                            case FBO -> forCondInstruction.addInstruction(conditionalJump(cond, forBodyLabel, nextLOrLabel).toString());
-                        }
+                        // 根据eqExp的类型,进行跳转语句的回填
+                        forCondInstruction.backFillConditionalJump(forBodyLabel, nextLabel);
                     }
                 }
 
@@ -1592,30 +1106,10 @@ public class Generator {
 
                 // 进行可能有的Continue和Break的回填
                 // continue回填
-                Integer pop;
-                pop = needContinues.pop();
-                while (pop != 0) {
-                    // 需要回填,回填到forStep(如果有),否则回填到forCond(如果有),否则回填到forBody
-                    Instruction needFillContinue = continueInstructions.pop();
-                    if (forStepLabel != null) {
-                        needFillContinue.addInstruction(unconditionalJump(forStepLabel).toString());
-                    }
-                    else {
-                        needFillContinue.addInstruction(unconditionalJump(Objects.requireNonNullElse(forCondLabel, forBodyLabel)).toString());
-                    }
-                    // 更新pop
-                    pop--;
-                }
+                BACK_FILL.backFillContinue(forStepLabel, forCondLabel, forBodyLabel);
+
                 // break回填
-                pop = needBreaks.pop();
-                while (pop != 0) {
-                    // 需要回填,回填到nextLabel
-                    Instruction needFillBreak = breakInstructions.pop();
-                    // 回填到nextLabel
-                    needFillBreak.addInstruction(unconditionalJump(nextLabel).toString());
-                    // 更新pop
-                    pop--;
-                }
+                BACK_FILL.backFillBreak(nextLabel);
 
                 // 除了forBody外语句回填完毕,现在统合可能为Block类型的循环体
                 if (forBodyInstruction.isBlock()) {
@@ -1635,33 +1129,31 @@ public class Generator {
                         forBodyInstruction.addInstruction(unconditionalJump(Objects.requireNonNullElse(forCondLabel, forBodyLabel)).toString());
                     }
                 }
-
-
                 // 整合for循环的所有指令
                 // 有条件判断的跳转条件判断,没有条件判断的直接跳转循环体
                 instruction.addInstruction(unconditionalJump(Objects.requireNonNullElse(forCondLabel, forBodyLabel)).toString());
                 // forCond
                 if (forCondLabel != null) {
-                    instruction.addInstruction(addLabel(forCondLabel).toString());
+                    instruction.addInstruction(UTILS.addLabel(forCondLabel).toString());
                     for (Instruction forCondInstruction : forCondInstructions) {
                         instruction.addInstruction(forCondInstruction.toString());
                         // 如果有下一个条件判断的基本块,那么加入指令
                         if (forCondInstruction.getNextLabel() != null) {
-                            instruction.addInstruction(addLabel(forCondInstruction.getNextLabel()).toString());
+                            instruction.addInstruction(UTILS.addLabel(forCondInstruction.getNextLabel()).toString());
                         }
                     }
                 }
                 // forBody
-                instruction.addInstruction(addLabel(forBodyLabel).toString());
+                instruction.addInstruction(UTILS.addLabel(forBodyLabel).toString());
                 instruction.addInstruction(forBodyInstruction.toString());
                 // forStep
                 if (forStepLabel != null) {
-                    instruction.addInstruction(addLabel(forStepLabel).toString());
+                    instruction.addInstruction(UTILS.addLabel(forStepLabel).toString());
                     instruction.addInstruction(forStepInstruction.toString());
                 }
 
                 // nextLabel, 直接加入指令集合即可,不用管下一条语句的详细分析过程
-                instruction.addInstruction(addLabel(nextLabel).toString());
+                instruction.addInstruction(UTILS.addLabel(nextLabel).toString());
 
                 // 分析完成,弹出条件类型
                 condTypes.pop();
@@ -1670,20 +1162,20 @@ public class Generator {
 
             case GET:
                 // LVal '=' 'getint''('')'
-                AllocElement allocElement = callFunc("getint", null);
+                AllocElement allocElement = UTILS.callFunc("getint", null);
                 String rVal = allocElement.getLlvmName();
                 // 记录函数调用指令
                 instruction.addInstruction(allocElement.getInstruction());
                 // 通过标识符名称找到其在中间代码中的名称(全局变量为@*,局部变量为%*)
                 lValNode = stmtNode.getlValNode();
                 name = lValNode.getIdentToken().getValue();
-                symbol = findSymbol(name);
+                symbol = UTILS.findSymbol(name, null);
                 String dName = symbol.getLlvmName();
                 dimension = symbol.getDimension();
                 // 非数组
                 if (dimension == 0) {
                     // 记录store指令
-                    instruction.addInstruction(store(I32, rVal, I32POINT, dName));
+                    instruction.addInstruction(UTILS.store(I32, rVal, I32POINT, dName));
                 }
                 // 数组
                 else {
@@ -1705,24 +1197,12 @@ public class Generator {
                     // 无返回值
                     instruction.addInstruction(TAB + "ret void");
                 }
-                // 若是在ifBody.elseBody.forBody里,要打上跳转标记
-                if (ifFlag) {
-                    ifJump.pop();
-                    ifJump.push(true);
-                }
-                if (elseFlag) {
-                    elseJump.pop();
-                    elseJump.push(true);
-                }
-                if (forFlag) {
-                    forJump.pop();
-                    forJump.push(true);
-                }
+                // 查看在哪种Block里,打上标记
+                setJumpFlag(ifFlag, elseFlag, forFlag);
                 break;
             default:
                 break;
         }
-
         return instruction;
     }
 
@@ -1737,12 +1217,12 @@ public class Generator {
         // LVal类型
         LValNode lValNode = forStmtOne.getlValNode();
         String name = lValNode.getIdentToken().getValue();
-        ValSymbol valSymbol = (ValSymbol) findSymbol(name);
+        ValSymbol valSymbol = (ValSymbol) UTILS.findSymbol(name, null);
         int dimension = valSymbol.getDimension();
         // 非数组
         if (dimension == 0) {
             // 记录store指令
-            instruction.addInstruction(store(I32, rVal, I32POINT, valSymbol.getLlvmName()));
+            instruction.addInstruction(UTILS.store(I32, rVal, I32POINT, valSymbol.getLlvmName()));
         }
         // 数组
         else {
@@ -1776,7 +1256,7 @@ public class Generator {
             List<Instruction> eqExpInstructions = lAndExpHandler(popLAnd, hasNextLOr);
             if (hasNextLOr) {
                 // 申请Label
-                String nextLOrLabel = allocLabel();
+                String nextLOrLabel = UTILS.allocLabel();
                 // 遍历得到的指令集合,为其加上nextLOrLabel
                 for (Instruction eqExpInstruction : eqExpInstructions) {
                     eqExpInstruction.setNextLOrLabel(nextLOrLabel);
@@ -1811,7 +1291,7 @@ public class Generator {
             boolean hasNextLAnd = !eqExpNodes.isEmpty();
             if (hasNextLAnd) {
                 // 申请Label
-                String nextLAnd = allocLabel();
+                String nextLAnd = UTILS.allocLabel();
                 eqExpInstruction.setNextLAndLabel(nextLAnd);
                 // 为当前指令集记录下一个基本块的Label
                 eqExpInstruction.setNextLabel(nextLAnd);
@@ -1905,7 +1385,7 @@ public class Generator {
             relCal(instruction, val1, val2, eqExpNode.getOpToken().getType());
         }
         // 有下一个RelExp或者传来的类型为I1,说明已经进行过关系运算或正要进行关系运算
-        else if (hasNext || Objects.equals(curLocalValTable.getLocalValType(val2), I1)) {
+        else if (hasNext || Objects.equals(UTILS.getLocalValType(val2), I1)) {
             instruction.setLlvmName(val2);
         }
         else {
@@ -1940,8 +1420,8 @@ public class Generator {
      * 检查参数类型是否需要转换
      */
     public String checkZext(Instruction instruction, String val) {
-        if (Objects.equals(curLocalValTable.getLocalValType(val), I1)) {
-            AllocElement zextAlloc = zext(val);
+        if (Objects.equals(UTILS.getLocalValType(val), I1)) {
+            AllocElement zextAlloc = UTILS.zext(val);
             val = zextAlloc.getLlvmName();
             instruction.addInstruction(zextAlloc.getInstruction());
         }
@@ -1955,7 +1435,7 @@ public class Generator {
             // 检查是否需要改变类型,val1和val2都有可能在Cond里用到,由unaryExp转来,所以要检查
             val1 = checkZext(instruction, val1);
             val2 = checkZext(instruction, val2);
-            AllocElement icmpAlloc = icmp(opType, val1, val2);
+            AllocElement icmpAlloc = UTILS.icmp(opType, val1, val2);
             ret = icmpAlloc.getLlvmName();
             instruction.addInstruction(icmpAlloc.getInstruction());
         }
@@ -2011,7 +1491,7 @@ public class Generator {
         String ret;
         val1 = checkZext(instruction, val1);
         val2 = checkZext(instruction, val2);
-        AllocElement allocElement = calPrint(I32, val1, val2, opType);
+        AllocElement allocElement = UTILS.calPrint(I32, val1, val2, opType);
         ret = allocElement.getLlvmName();
         instruction.addInstruction(allocElement.getInstruction());
         instruction.setLlvmName(ret);
@@ -2045,7 +1525,7 @@ public class Generator {
                 String op = opStack.pop();
                 // '-' 号 减法运算
                 if (Objects.equals(op, "-")) {
-                    AllocElement alloc = calPrint(I32, "0", rVal, TokenType.MINU);
+                    AllocElement alloc = UTILS.calPrint(I32, "0", rVal, TokenType.MINU);
                     instruction.addInstruction(alloc.getInstruction());
                     // 更新值
                     rVal = alloc.getLlvmName();
@@ -2053,7 +1533,7 @@ public class Generator {
                 // ‘!’,非运算,出现在条件表达式
                 else if (Objects.equals(op, "!")) {
                     // 记录非计算
-                    Instruction notInstruction = not(rVal);
+                    Instruction notInstruction = UTILS.not(rVal);
                     instruction.addInstruction(notInstruction.toString());
                     // 更新值
                     rVal = notInstruction.getLlvmName();
@@ -2078,7 +1558,7 @@ public class Generator {
                 }
             }
             // 无论需不需要赋值,调用有返回值函数都会存储其值
-            AllocElement alloc = callFunc(funcName, args);
+            AllocElement alloc = UTILS.callFunc(funcName, args);
             instruction.addInstruction(alloc.getInstruction());
             instruction.setLlvmName(alloc.getLlvmName());
         }
@@ -2104,7 +1584,7 @@ public class Generator {
             int getDimension = lValNode.getExpNodes().size();
             String name = lValNode.getIdentToken().getValue();
             // 可能是ValSymbol或FuncParamSymbol
-            Symbol symbol = findSymbol(name);
+            Symbol symbol = UTILS.findSymbol(name, null);
             String llvmName = symbol.getLlvmName();
             String retName;
             Instruction instruction = new Instruction(null, new StringJoiner("\n"));
@@ -2112,7 +1592,7 @@ public class Generator {
             int dimension = symbol.getDimension();
             if (dimension == 0) {
                 // 非数组
-                AllocElement alloc = load(I32, llvmName);
+                AllocElement alloc = UTILS.load(I32, llvmName);
                 retName = alloc.getLlvmName();
                 instruction.addInstruction(alloc.getInstruction());
                 instruction.setLlvmName(retName);
@@ -2135,7 +1615,7 @@ public class Generator {
                 instruction.addInstruction(elementPtr.toString());
                 // 数组lVal,只有获取维度等于数组维度的才load
                 if (dimension == getDimension) {
-                    AllocElement load = load(I32, elementPtr.getLlvmName());
+                    AllocElement load = UTILS.load(I32, elementPtr.getLlvmName());
                     instruction.addInstruction(load.getInstruction());
                     retName = load.getLlvmName();
                 }

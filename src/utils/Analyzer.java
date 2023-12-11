@@ -5,8 +5,6 @@ import error.ErrorHandler;
 import frontend.Lexer;
 import frontend.Parser;
 import llvm.Generator;
-import symbol.Symbol;
-import symbol.SymbolTable;
 import symbol.SymbolTableBuilder;
 import token.Token;
 
@@ -21,7 +19,7 @@ public class Analyzer {
     private static final String ERROR_FILE_PATH = "error.txt";
     private static final String LLVM_FILE_PATH = "llvm_ir.txt";
     public static void lexerAnalyze(boolean needShowInfo) {
-        try(BufferedReader bf = new BufferedReader(new FileReader(INPUT_FILE_PATH));){
+        try(BufferedReader bf = new BufferedReader(new FileReader(INPUT_FILE_PATH))){
             StringJoiner sourceJoiner = new StringJoiner("\n");
             String line;
             // 用readline读入无需考虑换行符不匹配这一问题
@@ -34,7 +32,7 @@ public class Analyzer {
             // 初始化lexer
             lexer.init(sourceJoiner.toString());
             if (needShowInfo) {
-                try(BufferedWriter bw = new BufferedWriter(new FileWriter(OUTPUT_FILE_PATH, true));) {
+                try(BufferedWriter bw = new BufferedWriter(new FileWriter(OUTPUT_FILE_PATH, true))) {
                     while ((token = lexer.next()) != null) {
                         bw.write(token.toString());
                     }
@@ -61,12 +59,7 @@ public class Analyzer {
         Parser.getPARSER().init();
         Parser.getPARSER().analyze();
         if (needShowInfo) {
-            try (BufferedWriter bw = new BufferedWriter(new FileWriter(OUTPUT_FILE_PATH))) {
-                Parser.getPARSER().show();
-            }
-            catch (IOException e){
-                e.printStackTrace();
-            }
+            Parser.getPARSER().show();
         }
     }
 
