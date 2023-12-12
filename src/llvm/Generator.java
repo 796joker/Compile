@@ -45,20 +45,10 @@ public class Generator {
      * Utils工具类实例
      */
     private static final Utils UTILS = Utils.getUTILS();
-
     /**
-     * 记录当前的forBody是否有直接跳转
+     * Jump工具类实例
      */
-    Stack<Boolean> forJump;
-    /**
-     * 记录当前的ifBody是否有直接跳转
-     */
-    Stack<Boolean> ifJump;
-    /**
-     * 记录当前的elseBody是否有直接跳转
-     */
-    Stack<Boolean> elseJump;
-
+    private static final Jump JUMP = Jump.getJUMP();
     private StringJoiner ret;
 
     private static final Generator GENERATOR = new Generator();
@@ -72,37 +62,15 @@ public class Generator {
     }
 
     /**
-     * 为return,continue,break语句打上跳转标记
-     */
-    public void setJumpFlag(boolean ifFlag, boolean elseFlag, boolean forFlag) {
-        if (ifFlag) {
-            ifJump.pop();
-            ifJump.push(true);
-        }
-        if (elseFlag) {
-            elseJump.pop();
-            elseJump.push(true);
-        }
-        if (forFlag) {
-            forJump.pop();
-            forJump.push(true);
-        }
-    }
-
-
-    /**
      * 初始化
      */
     public void init() {
         this.ret = new StringJoiner("\n");
         this.condTypes = new Stack<>();
-        // 初始化Jump标记
-        forJump = new Stack<>();
-        ifJump = new Stack<>();
-        elseJump = new Stack<>();
         // 初始化工具类
         UTILS.init();
         BACK_FILL.init();
+        JUMP.init();
     }
 
 
@@ -172,7 +140,9 @@ public class Generator {
     }
 
 
-    // 获取语法分析时生成的AST,遍历各个成分进行分析
+    /**
+     * 获取语法分析时生成的AST,遍历各个成分进行分析
+     */
     public void generate() {
         // 加入库函数定义
         // declare i32 @getint() ; declare void @putint(i32) ; declare void @putch(i32)
@@ -302,10 +272,10 @@ public class Generator {
             // 一维
             if (dimension == 1) {
                 if (isConst) {
-                    initGlobalArr(constInitValNode, initValNode, stringJoiner, isConst, null, constValues);
+                    initGlobalArr(constInitValNode, initValNode, stringJoiner, true, null, constValues);
                 }
                 else {
-                    initGlobalArr(constInitValNode, initValNode, stringJoiner, isConst, null, null);
+                    initGlobalArr(constInitValNode, initValNode, stringJoiner, false, null, null);
                 }
             }
             // 二维
@@ -530,7 +500,7 @@ public class Generator {
         // 分析函数体
         List<BlockItemNode> blockItemNodes = funcDefNode.getBlockNode().getBlockItemNodes();
         for (BlockItemNode blockItemNode : blockItemNodes) {
-            Instruction block = blockItemHandler(blockItemNode, false, false, false);
+            Instruction block = blockItemHandler(blockItemNode, null);
             // blockItem里的Stmt里的Block类型需要注意整合指令
             if (block.isBlock()) {
                 block.unionNeedBack();
@@ -574,7 +544,7 @@ public class Generator {
         for (BlockItemNode blockItemNode : blockItemNodes) {
             // 主函数分析里得到的blockItem返回的指令集直接加入结果就好,没有回填的说法
             // 但是仍然可能存在无for的Block, 如 if-Block else-Block 和 纯 Block,所以需要聚合
-            blockItemInstruction = blockItemHandler(blockItemNode, false, false, false);
+            blockItemInstruction = blockItemHandler(blockItemNode, null);
             blockItemInstruction.unionNeedBack();
             ret.add(blockItemInstruction.toString());
         }
@@ -646,7 +616,7 @@ public class Generator {
     }
 
 
-    public Instruction blockItemHandler(BlockItemNode blockItemNode, boolean ifFlag, boolean elseFlag, boolean forFlag) {
+    public Instruction blockItemHandler(BlockItemNode blockItemNode, Jump.JumpType jumpType) {
         // 指令集合
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
         //  BlockItem → Decl | Stmt
@@ -783,7 +753,7 @@ public class Generator {
         else {
             StmtNode stmtNode = blockItemNode.getStmtNode();
             // 此处不能聚合为Block类型的,要预留嵌套回填,直接返回即可
-            return stmtHandler(stmtNode, ifFlag, elseFlag, forFlag);
+            return stmtHandler(stmtNode, jumpType);
         }
         return instruction;
     }
@@ -820,7 +790,7 @@ public class Generator {
     }
 
 
-    public Instruction stmtHandler(StmtNode stmtNode, boolean ifFlag, boolean elseFlag, boolean forFlag) {
+    public Instruction stmtHandler(StmtNode stmtNode, Jump.JumpType jumpType) {
         Instruction instruction = new Instruction(null, new StringJoiner("\n"));
         Instruction addExpInstruction;
         String nextLabel;
@@ -840,7 +810,7 @@ public class Generator {
                 StmtNode tmpStmt;
                 for (BlockItemNode blockItemNode : blockItemNodes) {
                     // 遍历加入每一个BlockItem获得的指令集
-                    blockInstructions.add(blockItemHandler(blockItemNode, ifFlag, elseFlag, forFlag));
+                    blockInstructions.add(blockItemHandler(blockItemNode, jumpType));
                     // 如果是一个Block里的continue或break语句,那么后面的都不用再分析了
                     if ((tmpStmt = blockItemNode.getStmtNode()) != null) {
                         if (tmpStmt.getStmtType() == StmtNode.StmtType.CONTINUE || tmpStmt.getStmtType() == StmtNode.StmtType.BREAK) {
@@ -919,13 +889,13 @@ public class Generator {
                 break;
             case CONTINUE:
                 // 查看在哪种Block里,打上标记
-                setJumpFlag(ifFlag, elseFlag, forFlag);
+                JUMP.setJumpFlag(jumpType);
                 // 需要回填,返回的是对象,可以之后回填,打上标记即可
                 BACK_FILL.addNeedBackFillIC(instruction);
                 return instruction;
             case BREAK:
                 // 查看在哪种Block里,打上标记
-                setJumpFlag(ifFlag, elseFlag, forFlag);
+                JUMP.setJumpFlag(jumpType);
                 // 需要回填,打上标记
                 BACK_FILL.addNeedBackFillIB(instruction);
                 return instruction;
@@ -944,11 +914,11 @@ public class Generator {
                 List<Instruction> ifCondInstructions = lOrExpHandler(stmtNode.getCondNode().getlOrExpNode());
 
                 // ifBody, 默认无直接跳转
-                ifJump.push(false);
+                JUMP.initJump(Jump.JumpType.IF);
                 String ifBodyLabel = UTILS.allocLabel();
                 // 若是Block类型,可能需要回填
                 StmtNode forStmtNode = stmtNode.getStmtNodes().get(0);
-                Instruction ifBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(0), true, false, false);
+                Instruction ifBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(0), Jump.JumpType.IF);
                 // 若是Block类型,标记;此时ifBodyInstructions本身已经有标记
                 boolean ifBodyB = ifBodyInstructions.isBlock();
                 // 若不是Block类型, Continue和Break也要归类为Block类型
@@ -962,9 +932,9 @@ public class Generator {
                 String elseBodyLabel = null;
                 boolean elseBodyB = false;
                 if (stmtNode.getElesToken() != null) {
-                    elseJump.push(false);
+                    JUMP.initJump(Jump.JumpType.ELSE);
                     elseBodyLabel= UTILS.allocLabel();
-                    elseBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(1), false, true, false);
+                    elseBodyInstructions = stmtHandler(stmtNode.getStmtNodes().get(1), Jump.JumpType.ELSE);
                     // 若是Block类型,标记,之后聚合
                     if (elseBodyInstructions.isBlock()) {
                         elseBodyB = true;
@@ -990,7 +960,7 @@ public class Generator {
                     }
                 }
                 // 如果当前if语句已经有跳转语句,不用回填
-                if (!ifJump.pop()) {
+                if (JUMP.isNotJump(Jump.JumpType.IF)) {
                     // ifBody最后一句是跳转语句, 需要回填
                     // 如果是Block类型,那么需要等待之后回填
                     if (ifBodyB) {
@@ -1004,7 +974,7 @@ public class Generator {
                 // elseBody最后一条语句也是跳转语句,如果有else,需要回填
                 if (elseBodyLabel != null) {
                     // 同理,else有直接跳转也不用回填
-                    if (!elseJump.pop()) {
+                    if (JUMP.isNotJump(Jump.JumpType.ELSE)) {
                         // 如果是Block类型,需要等待之后回填
                         if (elseBodyB) {
                             elseBodyInstructions.addNeedBackInstruction(unconditionalJump(nextLabel));
@@ -1095,10 +1065,10 @@ public class Generator {
                 String forBodyLabel = UTILS.allocLabel();
                 StmtNode forBodyStmt = stmtNode.getStmtNode();
                 Instruction forBodyInstruction;
-                forJump.push(false);
+                JUMP.initJump(Jump.JumpType.FOR);
                 // 直接为跳转语句非Block
                 if (forBodyStmt.getStmtType() == StmtNode.StmtType.CONTINUE || forBodyStmt.getStmtType() == StmtNode.StmtType.BREAK) {
-                    forBodyInstruction = stmtHandler(forBodyStmt, false, false, true);
+                    forBodyInstruction = stmtHandler(forBodyStmt, Jump.JumpType.FOR);
                 }
                 // Block
                 else if (forBodyStmt.getStmtType() == StmtNode.StmtType.BLOCK) {
@@ -1106,11 +1076,11 @@ public class Generator {
                     // Decl语句不必管 主要是Stmt里的Continue和Break语句会导致回填;
                     // 另外,当Stmt语句再导出Block时,若还是在同一层for循环里,里面的Continue和Break语句也会导致回填
                     // 因此Block进行分析时,里面的每一个BlockItem的指令集合都要进行保留,留待回到for循环回填完毕再统合
-                    forBodyInstruction = stmtHandler(forBodyStmt, false, false, true);
+                    forBodyInstruction = stmtHandler(forBodyStmt, Jump.JumpType.FOR);
                 }
                 // 除了跳转语句和Block以外的语句
                 else {
-                    forBodyInstruction = stmtHandler(forBodyStmt, false, false, true);
+                    forBodyInstruction = stmtHandler(forBodyStmt, Jump.JumpType.FOR);
                 }
 
                 // forStep, 步长语句
@@ -1155,7 +1125,7 @@ public class Generator {
                 // forBody, 最后一条语句是跳转语句,需要回填
                 // 因为可能是Block类型的Stmt,所以需要在其他回填结束后聚合再回填
                 // 如果为直接跳转语句,那么不需要填额外的跳转语句; 否则需要填跳转语句
-                if (!forJump.pop()) {
+                if (JUMP.isNotJump(Jump.JumpType.FOR)) {
                     // 跳转到步长语句(如果有), 否则跳转到forCond(如果有),否则跳转到循环体
                     if (forStepLabel != null) {
                         forBodyInstruction.addInstruction(unconditionalJump(forStepLabel).toString());
@@ -1233,7 +1203,7 @@ public class Generator {
                     instruction.addInstruction(TAB + "ret void");
                 }
                 // 查看在哪种Block里,打上标记
-                setJumpFlag(ifFlag, elseFlag, forFlag);
+                JUMP.setJumpFlag(jumpType);
                 break;
             default:
                 break;
