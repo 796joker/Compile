@@ -8,6 +8,7 @@ import token.TokenType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TooManyListenersException;
 
 public class Parser {
     private static final Parser PARSER = new Parser();
@@ -18,15 +19,44 @@ public class Parser {
 
     private Token currentToken;
     private CompUnitNode compUnitNode;
+    /**
+     * Tokens的index
+     */
     private int index;
+    /**
+     * 词法分析获得的token序列
+     */
     private List<Token> tokens;
+    /**
+     * 词法分析工厂类实例
+     */
     private final Lexer lexer = Lexer.getLexer();
     private final ErrorHandler errorHandler = ErrorHandler.getErrorHandler();
+
+    private final List<TokenType> funcTypeList = new ArrayList<>() {{
+       add(TokenType.INTTK);
+       add(TokenType.VOIDTK);
+    }};
+    private final List<TokenType> bTypeList = new ArrayList<>() {{
+        add(TokenType.INTTK);
+    }};
 
     public void init() {
         index = 0;
         tokens = lexer.getTokens();
         currentToken = tokens.get(index);
+    }
+
+    /**
+     * 获取funcType/bType类型,因为不会缺失这一类型的错误,所以不会返回null
+     */
+    private TokenType getType(List<TokenType> tokenTypes) {
+        for (TokenType type : tokenTypes) {
+            if (currentToken.getType() == type) {
+                return type;
+            }
+        }
+        return null;
     }
 
     /**
@@ -55,6 +85,10 @@ public class Parser {
 
     /**
      * 匹配Token终结符
+     * 若类型匹配,则index++,切换currentToken为下一个,返回当前Token;
+     * 若类型不匹配,index不改变,返回null,另外:
+     *            若为 ';'/ '}' / ']' 之一,则生成错误;
+     *            若不为上述类型之一,无其他操作.
      */
     public Token expect(TokenType type) {
         // 句子由终结符组成，所有语法树最终调用此函数来处理终结符
@@ -176,14 +210,8 @@ public class Parser {
 
     public FuncTypeNode funcType() {
         //  FuncType → 'void' | 'int'
-        if (currentToken.getType() == TokenType.VOIDTK || currentToken.getType() == TokenType.INTTK) {
-            Token token = currentToken;
-            currentToken = tokens.get(++index);
-            return new FuncTypeNode(token);
-        } else {
-            // TODO 错误处理
-            return null;
-        }
+        Token funcTypeToken = expect(getType(funcTypeList));
+        return new FuncTypeNode(funcTypeToken);
     }
 
     public FuncFParamsNode funcFParams() {
@@ -193,9 +221,9 @@ public class Parser {
         FuncFParamNode funcFParamNode = funcFParam();
         funcFParamNodes.add(funcFParamNode);
         // ','不会缺少,可以用
-        while (currentToken.getType() == TokenType.COMMA) {
-            commas.add(currentToken);
-            currentToken = tokens.get(++index);
+        Token commaToken = null;
+        while ((commaToken = expect(TokenType.COMMA)) != null) {
+            commas.add(commaToken);
             funcFParamNode = funcFParam();
             funcFParamNodes.add(funcFParamNode);
         }
@@ -217,16 +245,12 @@ public class Parser {
 
     public BTypeNode bType() {
         // BType → 'int'
-        Token intToken = expect(TokenType.INTTK);
+        Token intToken = expect(getType(bTypeList));
         return new BTypeNode(intToken);
     }
 
-    public ConstDefNode constDef() {
-        // ConstDef → Ident { '[' ConstExp ']' } '=' ConstInitVal
-        Token identToken = expect(TokenType.IDENFR);
-        List<Token> leftBracketTokens = new ArrayList<>();
-        List<Token> rightBracketTokens = new ArrayList<>();
-        List<ConstExpNode> constExpNodes = new ArrayList<>();
+    public void defArrHandler(List<Token> leftBracketTokens, List<Token> rightBracketTokens, List<ConstExpNode> constExpNodes) {
+        // Ident { '[' ConstExp ']' }
         while (currentToken.getType() == TokenType.LBRACK) {
             Token leftBracketToken = expect(TokenType.LBRACK);
             leftBracketTokens.add(leftBracketToken);
@@ -235,6 +259,16 @@ public class Parser {
             Token rightBracketToken = expect(TokenType.RBRACK);
             rightBracketTokens.add(rightBracketToken);
         }
+    }
+
+    public ConstDefNode constDef() {
+        // ConstDef → Ident { '[' ConstExp ']' } '=' ConstInitVal
+        Token identToken = expect(TokenType.IDENFR);
+        List<Token> leftBracketTokens = new ArrayList<>();
+        List<Token> rightBracketTokens = new ArrayList<>();
+        List<ConstExpNode> constExpNodes = new ArrayList<>();
+        // 调用维度处理函数
+        defArrHandler(leftBracketTokens, rightBracketTokens, constExpNodes);
         Token assignToken = expect(TokenType.ASSIGN);
         ConstInitValNode constInitValNode = constInitVal();
         return new ConstDefNode(identToken, leftBracketTokens, constExpNodes, rightBracketTokens, assignToken, constInitValNode);
@@ -247,18 +281,11 @@ public class Parser {
         List<Token> leftBracketTokens = new ArrayList<>();
         List<Token> rightBracketTokens = new ArrayList<>();
         List<ConstExpNode> constExpNodes = new ArrayList<>();
-        while (currentToken.getType() == TokenType.LBRACK) {
-            Token leftBracketToken = expect(TokenType.LBRACK);
-            leftBracketTokens.add(leftBracketToken);
-            ConstExpNode constExpNode = constExp();
-            constExpNodes.add(constExpNode);
-            Token rightBracketToken = expect(TokenType.RBRACK);
-            rightBracketTokens.add(rightBracketToken);
-        }
-        Token assignToken = null;
+        // 调用维度处理函数
+        defArrHandler(leftBracketTokens, rightBracketTokens, constExpNodes);
+        Token assignToken;
         InitValNode initValNode = null;
-        if (currentToken.getType() == TokenType.ASSIGN) {
-            assignToken = expect(TokenType.ASSIGN);
+        if ((assignToken = expect(TokenType.ASSIGN)) != null) {
             initValNode = initVal();
         }
         return new VarDefNode(identToken, leftBracketTokens, constExpNodes, rightBracketTokens, assignToken, initValNode);

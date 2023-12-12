@@ -772,6 +772,7 @@ public class Generator {
                     // 记录符号表
                     UTILS.setSymbolLLVMInfo(name, llvmType, llvmName, constValue, name);
                     UTILS.findSymbol(name, null).setConst();
+                    // 需要在设置完信息后再记录,否则哈希值会产生变化
                     if (size != 0) {
                         UTILS.addConstArrVal(UTILS.findSymbol(name, null), constValues);
                     }
