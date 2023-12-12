@@ -10,6 +10,29 @@ public class Symbol {
     private int dimension = -1;
     private String innerDim = null;
 
+    private boolean isConst = false;
+
+    public boolean isConst() {
+        return isConst;
+    }
+
+    public void setConst() {
+        isConst = true;
+    }
+
+    /**
+     * 是否已经优化忽略掉
+     */
+    private boolean isIgnored = false;
+
+    public boolean isIgnored() {
+        return isIgnored;
+    }
+
+    public void ignore() {
+        this.isIgnored = true;
+    }
+
     public void setInnerDim(String innerDim) {
         this.innerDim = innerDim;
     }

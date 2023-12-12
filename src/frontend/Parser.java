@@ -1,13 +1,10 @@
 package frontend;
 
-import error.DefError;
 import error.ErrorHandler;
 import error.ErrorType;
 import node.*;
-import symbol.Symbol;
-import symbol.SymbolTable;
-import symbol.ValSymbol;
-import token.*;
+import token.Token;
+import token.TokenType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,8 +20,8 @@ public class Parser {
     private CompUnitNode compUnitNode;
     private int index;
     private List<Token> tokens;
-    private Lexer lexer = Lexer.getLexer();
-    private ErrorHandler errorHandler = ErrorHandler.getErrorHandler();
+    private final Lexer lexer = Lexer.getLexer();
+    private final ErrorHandler errorHandler = ErrorHandler.getErrorHandler();
 
     public void init() {
         index = 0;
@@ -34,15 +31,13 @@ public class Parser {
 
     /**
      * 检查是否Exp
-     * @return
      */
     public boolean checkExp() {
         // [Exp] ';' F = { (,Number,Ident,+,-,! }
-        boolean ret = switch (currentToken.getType()) {
+        return switch (currentToken.getType()) {
             case LPARENT, INTCON, IDENFR, PLUS, MINU, NOT -> true;
             default -> false;
         };
-        return ret;
     }
 
 
@@ -75,21 +70,14 @@ public class Parser {
         // 进行语法错误处理,报错行号为分号前一个非终结符所在行号
         else {
             int lineNum = tokens.get(index - 1).getLineNum();
-            DefError defError = null;
             // 当不匹配时,当前字符继续匹配下一个语法成分,不要跳到下一个字符
             switch (type) {
-                case SEMICN:
-                    errorHandler.addError(lineNum, ErrorType.i);
-                    break;
-                case RPARENT:
-                    errorHandler.addError(lineNum, ErrorType.j);
-                    break;
-                case RBRACK:
-                    errorHandler.addError(lineNum, ErrorType.k);
-                    break;
-                default:
-                    // TODO 语法成分缺失错误
-                    break;
+                case SEMICN -> errorHandler.addError(lineNum, ErrorType.i);
+                case RPARENT -> errorHandler.addError(lineNum, ErrorType.j);
+                case RBRACK -> errorHandler.addError(lineNum, ErrorType.k);
+                default -> {
+                }
+                // TODO 语法成分缺失错误
             }
             return null;
         }
@@ -123,8 +111,6 @@ public class Parser {
         else if (tokens.get(index).getType() == TokenType.INTTK) {
             VarDeclNode varDeclNode = varDecl();
             return new DeclNode(null, varDeclNode);
-        } else {
-            // TODO 出错处理
         }
         return null;
     }
@@ -220,7 +206,7 @@ public class Parser {
         // Block → '{' { BlockItem } '}'
         Token leftBraceToken = expect(TokenType.LBRACE);
         List<BlockItemNode> blockItemNodes = new ArrayList<>();
-        BlockItemNode blockItemNode = null;
+        BlockItemNode blockItemNode;
         while (currentToken.getType() != TokenType.RBRACE) {
             blockItemNode = blockItem();
             blockItemNodes.add(blockItemNode);
@@ -495,7 +481,7 @@ public class Parser {
             semicolonTokens.add(semicolonToken);
             //  Cond → LOrExp LOrExp的FIRST集与Exp相同
             // 注意:这里不能简单地判断是Exp就进行Cond的分析,若缺失了第二个';'会导致判断错误
-            LValNode lValNode = null;
+            LValNode lValNode;
             if (checkExp()) {
                 // 若是Ident, LVal -> Ident{[Exp]}, Ident({FuncRParams})
                 if (currentToken.getType() == TokenType.IDENFR) {
@@ -540,8 +526,7 @@ public class Parser {
         } else if (currentToken.getType() == TokenType.SEMICN) {
             // [Exp] ';'
             Token semicolonToken = expect(TokenType.SEMICN);
-            ExpNode expNode = null;
-            return new StmtNode(StmtNode.StmtType.EXP, expNode, semicolonToken);
+            return new StmtNode(StmtNode.StmtType.EXP, (ExpNode) null, semicolonToken);
         } else {
             // [Exp] ';'
             ExpNode expNode = exp();
@@ -566,8 +551,8 @@ public class Parser {
         // AddExp → MulExp | AddExp ('+' | '−') MulExp
         MulExpNode mulExpNode = mulExp();
         AddExpNode addExpNode = new AddExpNode(mulExpNode, null, null);
-        Token opToken = null;
-        AddExpNode temp = null;
+        Token opToken;
+        AddExpNode temp;
         while (addOpCheck()) {
             // 说明这个MulExp是AddExp
             opToken = currentToken;
@@ -596,8 +581,8 @@ public class Parser {
         // MulExp → UnaryExp | MulExp ('*' | '/' | '%') UnaryExp
         UnaryExpNode unaryExpNode = unaryExp();
         MulExpNode mulExpNode = new MulExpNode(unaryExpNode, null, null);
-        MulExpNode temp = null;
-        Token opToken = null;
+        MulExpNode temp;
+        Token opToken;
         while (mulOpCheck()) {
             // 说明此时的Unary是MulExp
             opToken = currentToken;
@@ -663,8 +648,8 @@ public class Parser {
         // LAndExp → EqExp | LAndExp '&&' EqExp
         EqExpNode eqExpNode = eqExp();
         LAndExpNode lAndExpNode = new LAndExpNode(null, null, eqExpNode);
-        LAndExpNode temp = null;
-        Token andToken = null;
+        LAndExpNode temp;
+        Token andToken;
         while (currentToken.getType() == TokenType.AND) {
             andToken = currentToken;
             currentToken = tokens.get(++index);
@@ -717,8 +702,8 @@ public class Parser {
         //  EqExp → RelExp | EqExp ('==' | '!=') RelExp
         RelExpNode relExpNode = relExp();
         EqExpNode eqExpNode = new EqExpNode(relExpNode, null, null);
-        EqExpNode temp = null;
-        Token opToken = null;
+        EqExpNode temp;
+        Token opToken;
         while (eqOpCheck()) {
             opToken = currentToken;
             currentToken = tokens.get(++index);
@@ -756,8 +741,8 @@ public class Parser {
         // RelExp → AddExp | RelExp ('<' | '>' | '<=' | '>=') AddExp
         AddExpNode addExpNode = addExp();
         RelExpNode relExpNode = new RelExpNode(addExpNode, null, null);
-        RelExpNode temp = null;
-        Token opToken = null;
+        RelExpNode temp;
+        Token opToken;
         while (relOpCheck()) {
             opToken = currentToken;
             currentToken = tokens.get(++index);

@@ -52,9 +52,13 @@ public class Utils {
 
     /**
      * 这个Map存储标识符对应的的常数值,可能有全局常/变量对应的数值,int类型函数对应地返回值
-     * 不存储局部变量的值,这样不会有重名的key
      */
-    private HashMap<Symbol, Integer> symbolValHashMap;
+    private HashMap<Symbol, Integer> constValMap;
+
+    /**
+     * 记录常数数组的值
+     */
+    private HashMap<Symbol, List<Integer>> constArrValMap;
 
     /**
      * 用于分配的寄存器编号
@@ -65,7 +69,8 @@ public class Utils {
      * 初始化
      */
     public void init() {
-        this.symbolValHashMap = new HashMap<>(16);
+        this.constValMap = new HashMap<>(16);
+        this.constArrValMap = new HashMap<>(16);
         this.curSymbolTable = SYMBOL_TABLES.get(0);
         // 初始化符号表序号
         this.childTableIndex = new Stack<>();
@@ -173,8 +178,17 @@ public class Utils {
         Symbol symbol = findSymbol(name, defName);
         symbol.setLlvmName(llvmName);
         symbol.setLlvmType(llvmType);
-        symbolValHashMap.put(symbol, constValue);
+        constValMap.put(symbol, constValue);
     }
+
+
+    /**
+     * 获取常量的值
+     */
+    public int getConstValue(Symbol symbol) {
+        return constValMap.get(symbol);
+    }
+
 
     public Symbol findSymbol(String name, String defName) {
         // 正在定义或尚未定义的变量的llvmName是null
@@ -543,12 +557,35 @@ public class Utils {
             if (lValNode.getExpNodes().size() == 0) {
                 // 不是数组, 查表找到其对应值
                 Symbol symbol = findSymbol(lValNode.getIdentToken().getValue(), null);
-                return symbolValHashMap.get(symbol);
+                return constValMap.get(symbol);
             }
             else {
-                // 是数组, 算其对应值
+                // 常量表达式不包括数组元素
                 return 0;
             }
         }
     }
+
+    /**
+     * 记录常数数组的值
+     */
+    public void addConstArrVal(Symbol symbol, List<Integer> constValues) {
+        this.constArrValMap.put(symbol, constValues);
+    }
+
+    /**
+     * 获取常量数组元素的值
+     */
+    public String getConstArrEle(Symbol symbol, int i, int j) {
+        List<Integer> constValues = constArrValMap.get(symbol);
+        int index;
+        if (symbol.getDimension() == 1) {
+            index = i;
+        }
+        else {
+            index = i * ((ValSymbol) symbol).getInnerSize() + j;
+        }
+        return String.valueOf(constValues.get(index));
+    }
+
 }

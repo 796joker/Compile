@@ -11,6 +11,12 @@ public class ValSymbol extends Symbol{
      */
     private int dimension;
 
+    /**
+     * 二维数组内层维度
+     */
+    private int innerSize = 0;
+
+
     public ValSymbol(String name, boolean isConst, int dimension) {
         super(name);
         this.isConst = isConst;
@@ -23,5 +29,13 @@ public class ValSymbol extends Symbol{
 
     public int getDimension() {
         return dimension;
+    }
+
+    public void setInnerSize(int innerSize) {
+        this.innerSize = innerSize;
+    }
+
+    public int getInnerSize() {
+        return innerSize;
     }
 }
